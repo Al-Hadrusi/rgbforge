@@ -1,0 +1,49 @@
+name: Please add my device
+description: Ask for a driver for an RGB device RGB Forge doesn't support yet.
+labels: ["driver request"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Every driver is researched first and only added if it can be done safely
+        (no risk to cooling, memory settings or firmware). Some devices are deliberately
+        not supported; see "Deliberately not supported" in the README.
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Brand and exact model, as printed on the box.
+    validations:
+      required: true
+  - type: dropdown
+    id: type
+    attributes:
+      label: Kind of device
+      options:
+        - Motherboard
+        - Graphics card
+        - RAM
+        - Liquid cooler / fan hub
+        - Keyboard / mouse / mousemat / headset
+        - Other
+    validations:
+      required: true
+  - type: textarea
+    id: list
+    attributes:
+      label: Output of `rgbforge --list-devices`
+      description: Lists the IDs of USB devices without a driver. For RAM, paste `rgbforge --ram-check` instead.
+      render: text
+    validations:
+      required: true
+  - type: input
+    id: openrgb
+    attributes:
+      label: Does OpenRGB or liquidctl support it?
+      description: Optional, but it helps: their published protocol research is where drivers start.
+  - type: checkboxes
+    id: test
+    attributes:
+      label: Testing
+      options:
+        - label: I can test an experimental driver on my hardware and report back.
