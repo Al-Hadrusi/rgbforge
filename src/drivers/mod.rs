@@ -14,6 +14,7 @@ mod demo;
 mod gigabyte;
 mod lianli;
 mod nzxt;
+pub mod razer;
 pub mod sapphire;
 pub mod ene_ram;
 pub mod ddr4_check;
@@ -114,7 +115,7 @@ pub fn unsupported_usb() -> Vec<String> {
 pub fn unsupported_from(hids: Vec<HidInfo>) -> Vec<String> {
     let mut out: Vec<String> = hids
         .into_iter()
-        .filter(|h| lookup(h.vid, h.pid).is_none())
+        .filter(|h| lookup(h.vid, h.pid).is_none() && !is_razer(h))
         .map(|h| format!("{:04x}:{:04x} {}", h.vid, h.pid, h.name))
         .collect();
     out.sort();
@@ -177,10 +178,36 @@ pub fn detect(demo: DemoMode, gpu: bool, ram: bool) -> Detection {
     d
 }
 
+fn is_razer(h: &HidInfo) -> bool {
+    h.vid == RAZER_VID && razer::model(h.pid).is_some()
+}
+
+const RAZER_VID: u16 = 0x1532;
+
 pub fn detect_from(hids: Vec<HidInfo>, demo: DemoMode) -> Detection {
     let mut drivers: Vec<Box<dyn Driver>> = Vec::new();
     let mut problems = Vec::new();
+    // Razer devices have several interfaces; only the one that answers a read-only
+    // firmware query is used, once per physical device.
+    let mut razer_done: Vec<String> = Vec::new();
+    let mut razer_denied: Vec<(String, &'static str)> = Vec::new();
+    let razer_conflict = if hids.iter().any(is_razer) { razer::conflicting_tool_running() } else { None };
     for info in hids {
+        if let Some(model) = razer::model(info.pid).filter(|_| info.vid == RAZER_VID) {
+            let key = razer::device_key(&info.phys);
+            if razer_done.contains(&key) || razer_conflict.is_some() {
+                continue;
+            }
+            match razer::Razer::open(&info, model) {
+                Ok(d) => {
+                    razer_done.push(key);
+                    drivers.push(Box::new(d));
+                }
+                Err(e) if e.kind() == io::ErrorKind::PermissionDenied => razer_denied.push((key, model.name)),
+                Err(_) => {} // not the lighting interface
+            }
+            continue;
+        }
         let Some(sup) = lookup(info.vid, info.pid) else { continue };
         let result: io::Result<Box<dyn Driver>> = match sup.kind {
             Family::AuraArgb => aura::Aura::open(&info, sup.name, false).map(|d| Box::new(d) as Box<dyn Driver>),
@@ -213,6 +240,14 @@ pub fn detect_from(hids: Vec<HidInfo>, demo: DemoMode) -> Detection {
             )),
             Err(e) => problems.push(format!("Found {} but couldn't open it: {e}", sup.name)),
         }
+    }
+    if let Some(tool) = razer_conflict {
+        problems.push(format!("Razer devices skipped: {tool} is running and would talk to them at the same time. Close it, then click Find devices."));
+    }
+    razer_denied.retain(|(k, _)| !razer_done.contains(k));
+    razer_denied.dedup_by(|a, b| a.0 == b.0);
+    for (_, name) in razer_denied {
+        problems.push(format!("Found {name} but couldn't open it (no permission). Make sure the rgbforge-helper service is running (see Help)."));
     }
     let show_demo = match demo {
         DemoMode::Always => true,

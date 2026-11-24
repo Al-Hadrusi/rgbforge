@@ -6,6 +6,7 @@ No OpenRGB, no background services, no root.
 - **Two clicks:** pick an effect, pick a colour. Settings save automatically and come back next time.
 - **Effects:** Solid, Gradient, Breathe, Rainbow, Rainbow Wave (flows across *all* your devices), Comet,
   **Music** (pulses to whatever your PC plays; check it with `rgbforge --music-check`), Off.
+- **Temperature:** colour follows your CPU or GPU temperature (cool colour → hot colour).
 - **Tray icon:** closing the window keeps RGB Forge (and your effects) running in the tray. Left-click the icon to
   reopen the window; right-click for saved looks, lights off/on, and quit. With "Start with my computer", it starts in the tray.
 - **Sync** everything, or switch Sync off and give each device its own look.
@@ -47,6 +48,7 @@ Talks directly to these USB lighting controllers, plus anything plugged into the
 | Lian Li UNI HUB SL V2 / AL V2 | 0cf2:a103, a104, a105 |
 | Gigabyte RGB Fusion 2 (USB): board lighting + ARGB headers D_LED1/D_LED2 | 048d:5702, 8297, 5711, 8950 |
 | ASRock Polychrome RGB (USB), one colour per header | 26ce:01a2, 01a6 |
+| Razer Chroma (wired): BlackWidow Elite/2019/V3/V3 TKL/V3 Pro/V3 Mini/V4/V4 Pro/V4 75%/V4 X, Huntsman/Elite/TE/Mini/V2/V2 TKL/V2 Analog/V3 Pro, Ornata Chroma/V2/V3/V3 X, Cynosa Chroma/V2, Tartarus Pro/V2, DeathAdder V2/V2 Mini/Elite/Essential V2, Basilisk/V2/V3/V3 Pro/Ultimate, Viper/Mini/Ultimate (wired)/8KHz, Naga Trinity, Mamba Elite, Firefly V2/V2 Pro, Goliathus/Extended/3XL, Strider Chroma, Base Station Chroma/V2 | 1532:… (see `src/drivers/razer.rs`) |
 | Corsair Lighting Node Pro | 1b1c:0c0b |
 | Corsair Lighting Node Core | 1b1c:0c1a |
 | Corsair Commander Pro (lighting only) | 1b1c:0c10 |
@@ -91,6 +93,7 @@ to motherboard controllers: save-to-flash, calibration and config-table writes a
 | NZXT Kraken 2024 Plus | Different protocol whose effects save to the device. |
 | Lian Li UNI HUB (original, SL v1, AL v1, SL-Infinity) | Need a different USB transport or have known firmware issues. |
 | MSI Mystic Light | OpenRGB documents controllers being bricked by certain commands. |
+| Razer wireless (via receiver), legacy-matrix and single-LED models | Need different command sets; not yet researched to the same standard. RGB Forge also skips Razer devices while OpenRazer or OpenRGB is running. |
 | Gigabyte RGB Fusion 2 over SMBus (older boards) | Probing it has bricked Z390 boards. Only the USB version is supported. |
 | Corsair DDR5 RGB RAM (Vengeance, Dominator Platinum/Titanium) | RGB chips sit next to the DDR5 power chip, which the chipset's write lock doesn't cover; documented lock-ups and boot failures. |
 | Kingston FURY DDR5 RGB RAM | Identification needs page-select writes to the memory-settings chip, the documented DDR5 corruption mechanism. |
