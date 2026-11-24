@@ -1,0 +1,60 @@
+name: Device works / doesn't work
+description: Tell us how RGB Forge behaves with a supported device (this is how experimental drivers get confirmed).
+labels: ["device report"]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing! Reports like this are how *experimental* drivers become confirmed.
+        If something could damage hardware, please use the private security report instead.
+  - type: input
+    id: device
+    attributes:
+      label: Device
+      description: Brand and exact model, as printed on the box.
+      placeholder: e.g. NZXT Kraken X63, Razer BlackWidow V3, ASUS ROG STRIX Z790-H
+    validations:
+      required: true
+  - type: dropdown
+    id: result
+    attributes:
+      label: Result
+      options:
+        - Works fully
+        - Partly works (some LEDs/zones wrong or missing)
+        - Detected, but the lights don't change
+        - Not detected at all
+    validations:
+      required: true
+  - type: textarea
+    id: details
+    attributes:
+      label: What happened?
+      description: Which lights changed, which didn't, wrong colours, flicker, errors in the app's status bar…
+    validations:
+      required: true
+  - type: textarea
+    id: report
+    attributes:
+      label: Device report
+      description: In the app, Help → Report a problem → **Copy device report**, then paste here.
+      render: text
+    validations:
+      required: true
+  - type: textarea
+    id: list
+    attributes:
+      label: Output of `rgbforge --list-devices`
+      render: text
+  - type: textarea
+    id: service
+    attributes:
+      label: Output of `systemctl status rgbforge-helper`
+      render: text
+  - type: input
+    id: system
+    attributes:
+      label: Distribution and kernel
+      description: e.g. Arch Linux, output of `uname -r`
+    validations:
+      required: true
