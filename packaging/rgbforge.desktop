@@ -1,0 +1,10 @@
+[Desktop Entry]
+Type=Application
+Name=RGB Forge
+GenericName=RGB Lighting Control
+Comment=Control the RGB lighting in your PC
+Exec=rgbforge
+Icon=preferences-desktop-color
+Terminal=false
+Categories=Utility;Settings;HardwareSettings;
+Keywords=rgb;led;lighting;argb;fans;aio;
