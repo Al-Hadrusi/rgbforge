@@ -674,8 +674,8 @@ impl App<'_> {
             .show(ctx, |ui| {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     egui::CollapsingHeader::new(RichText::new("My device isn't showing up").strong()).default_open(true).show(ui, |ui| {
-                        ui.label("Linux only lets normal apps use USB lighting controllers after a one-time permission setup. Copy this into a terminal, then click \"Find devices\":");
-                        let cmd = "rgbforge --print-udev-rules | sudo tee /etc/udev/rules.d/60-rgbforge.rules && sudo udevadm control --reload-rules && sudo udevadm trigger";
+                        ui.label("For security, only RGB Forge's small hardware service (rgbforge-helper) may talk to lighting hardware; this app asks it to. If no real devices show up, make sure the service is running, then click \"Find devices\":");
+                        let cmd = "sudo systemctl enable --now rgbforge-helper";
                         egui::Frame::new().fill(BG).corner_radius(8).inner_margin(10).show(ui, |ui| {
                             ui.add(egui::Label::new(RichText::new(cmd).monospace().color(TEXT)).wrap());
                         });
@@ -689,7 +689,7 @@ impl App<'_> {
                             }
                         });
                         ui.add_space(4.0);
-                        ui.label(RichText::new("This only grants access to the exact controllers listed below, nothing else on your system.").color(DIM));
+                        ui.label(RichText::new("No other program gets access to your hardware: the service only accepts \"show these colours\" requests, checked against each device's safety list.").color(DIM));
                     });
                     egui::CollapsingHeader::new(RichText::new("Report a problem").strong()).show(ui, |ui| {
                         ui.label("Lights not doing what the preview shows? Copy this report and send it to whoever is helping you. It lists what RGB Forge detected (no personal data).");

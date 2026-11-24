@@ -1,0 +1,39 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+  schedule:
+    - cron: "17 4 * * 1" # weekly, so new advisories against existing code are caught too
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    name: Tests, lints and safety rules
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+        with:
+          components: clippy
+      - name: No unsafe code (also enforced by the compiler)
+        run: grep -q 'unsafe_code = "forbid"' Cargo.toml
+      - name: Clippy (warnings are errors; unwrap/panic/indexing are denied)
+        run: cargo clippy --all-targets --locked -- -D warnings
+      - name: Tests (incl. every driver's write allow-list)
+        run: cargo test --locked
+      - name: No device permissions for users in the udev rules
+        run: |
+          cargo run --locked --quiet -- --print-udev-rules > rules.txt
+          ! grep -E 'uaccess|MODE=|GROUP=' rules.txt
+
+  audit:
+    name: Dependency audit (RustSec)
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dtolnay/rust-toolchain@stable
+      - run: cargo install cargo-audit --locked
+      - run: cargo audit

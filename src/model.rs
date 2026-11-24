@@ -70,7 +70,7 @@ impl Kind {
 
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct ZoneInfo {
     pub name: String,
     pub leds: u16,
@@ -80,7 +80,7 @@ pub struct ZoneInfo {
     pub max_leds: u16,
 }
 
-#[derive(Clone, Debug, PartialEq, Eq)]
+#[derive(Clone, Debug, PartialEq, Eq, Serialize, Deserialize)]
 pub struct DeviceInfo {
     /// Stable id used to remember settings (survives restarts).
     pub id: String,

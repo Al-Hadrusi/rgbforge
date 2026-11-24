@@ -18,14 +18,17 @@ No OpenRGB, no background services, no root.
 ./install.sh
 ```
 
-This builds the app, adds **RGB Forge** to your app menu, and sets up the one-time
-permission rule so your user can talk to supported lighting controllers (it asks for your password once).
+Run it as your normal user (not with `sudo`); it asks for your password for the system steps. It:
 
-You need Rust installed (<https://rustup.rs>). To just try it without installing:
+1. builds RGB Forge and installs it to `/usr/local/bin/rgbforge` (root-owned, so nothing can tamper with it),
+2. adds **RGB Forge** to your app menu,
+3. installs and starts **`rgbforge-helper`**, the sandboxed system service that is the only thing
+   allowed to talk to lighting hardware (see [Security](#security)).
 
-```bash
-cargo run --release
-```
+You need Rust installed (<https://rustup.rs>). To update later: `git pull && ./install.sh`.
+Upgrading from an older version? Restart once afterwards so its old device permissions are fully removed.
+
+To try the app without installing (demo devices only): `cargo run --release`.
 
 ## Supported hardware
 
@@ -111,12 +114,34 @@ per model.
 | No crash points | `unwrap`, `expect`, `panic!` and unchecked indexing are denied by lints |
 | Fixed allow-list | Only the USB IDs above are ever opened; every other device is ignored |
 | Colour commands only | Never writes firmware or device flash/EEPROM |
-| No root | The permission rule grants access only to the controllers above |
+| Least privilege | Only the sandboxed `rgbforge-helper` service touches hardware; see [Security](#security) |
 | Gives up safely | After repeated errors it stops talking to a device until you click *Find devices* |
 | No strobe effects | Avoids photosensitivity risks; every effect changes smoothly |
 | Settings can't be corrupted | Atomic saves; a damaged file is kept as `.bak` and defaults load |
 
-USB access uses plain reads and writes on `/dev/hidraw*` (no ioctls), so there's no C library involved.
+USB access uses plain reads and writes on `/dev/hidraw*`, except Gigabyte (HID feature reports via the
+`hidapi` crate's pure-Rust backend); I²C uses the `i2cdev` crate. No C libraries for hardware access.
+
+## Security
+
+**Nothing but `rgbforge-helper` can reach your lighting hardware.** Earlier versions gave your user
+direct access to the controllers and buses, which meant any program you ran had it too (including,
+on some coolers, pump control). Now:
+
+- **No device permissions for users.** The udev rule grants nothing; device nodes stay root-only.
+- **A narrow service.** `rgbforge-helper` (systemd) accepts only *list devices*, *show these colours*,
+  *set an LED count* and *run a read-only check* over a local socket. There is no "send raw bytes"
+  request, and every write still passes the driver's allow-list. Any local program may connect, but
+  the most it can do is change colours. Messages are size-limited and validated; frames are trimmed
+  to each device's real size; rate limits are enforced in the service itself.
+- **Sandboxed.** The service has no capabilities, no network, no access to home folders, a read-only
+  system view, can only open I²C and USB-HID device nodes, and runs with a restricted system-call set.
+  `systemd-analyze security rgbforge-helper` rates it **1.1 / 10 ("OK")**.
+- **Tamper-resistant install.** The binary the service runs lives in root-owned `/usr/local/bin`.
+- **Supply chain.** `Cargo.lock` is committed; CI runs a RustSec dependency audit on every change and
+  weekly, and Dependabot proposes updates.
+
+Found a problem? See [SECURITY.md](SECURITY.md) to report it privately.
 
 ## Project layout
 
@@ -127,6 +152,8 @@ USB access uses plain reads and writes on `/dev/hidraw*` (no ioctls), so there's
 | `src/effects.rs` | Effect maths |
 | `src/drivers/` | `aura.rs`, `corsair.rs`, `demo.rs` and the allow-list in `mod.rs` |
 | `src/hidraw.rs` | Safe USB HID access |
+| `src/helper.rs`, `src/proto.rs`, `src/remote.rs` | The hardware service, its message format, and the app side |
+| `packaging/rgbforge-helper.service` | The sandboxed systemd service |
 | `src/config.rs` | Settings and saved looks (`~/.config/rgbforge/settings.json`) |
 
 ## Development

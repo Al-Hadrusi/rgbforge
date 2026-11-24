@@ -1,27 +1,61 @@
 #!/usr/bin/env bash
-# Builds RGB Forge and installs it for the current user.
-# The only step that needs sudo is the device-permission rule (you'll be asked).
+# Builds and installs RGB Forge.
+#
+# Security model: only the small, sandboxed `rgbforge-helper` system service may touch
+# lighting hardware. The app (and every other program you run) gets NO direct device
+# access; the app asks the service to show colours, and the service checks every request
+# against each device's safety allow-list.
+#
+# Run as your normal user (not with sudo); it asks for your password for the system steps.
 set -euo pipefail
 cd "$(dirname "$0")"
+
+if [ "$(id -u)" -eq 0 ]; then
+    echo "Please run ./install.sh as your normal user, not with sudo (it asks for your password when needed)."
+    exit 1
+fi
+
+BIN=/usr/local/bin/rgbforge
 
 echo "==> Building (this takes a minute the first time)…"
 cargo build --release
 
-echo "==> Installing the app to ~/.local/bin"
-install -Dm755 target/release/rgbforge "$HOME/.local/bin/rgbforge"
-mkdir -p "$HOME/.local/share/applications"
-# Use the full path: app menus often don't search ~/.local/bin.
-sed "s|^Exec=.*|Exec=$HOME/.local/bin/rgbforge|" packaging/rgbforge.desktop > "$HOME/.local/share/applications/rgbforge.desktop"
-update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+echo "==> Installing the program to $BIN (root-owned, so no other program can tamper with it)"
+sudo install -o root -g root -m 755 target/release/rgbforge "$BIN"
+# Older versions lived in a folder your user can write to; remove that copy.
+rm -f "$HOME/.local/bin/rgbforge"
 
-echo "==> Allowing your user to talk to supported RGB controllers (needs sudo)"
-target/release/rgbforge --print-udev-rules | sudo tee /etc/udev/rules.d/60-rgbforge.rules >/dev/null
-# i2c-dev gives access to I2C buses as files (only the GPU's RGB bus is unlocked by the rule above).
+echo "==> Adding RGB Forge to your app menu"
+mkdir -p "$HOME/.local/share/applications"
+sed "s|^Exec=.*|Exec=$BIN|" packaging/rgbforge.desktop > "$HOME/.local/share/applications/rgbforge.desktop"
+update-desktop-database "$HOME/.local/share/applications" 2>/dev/null || true
+# "Start with my computer" entries from older versions point at the old location.
+AUTOSTART="${XDG_CONFIG_HOME:-$HOME/.config}/autostart/rgbforge.desktop"
+if [ -f "$AUTOSTART" ]; then
+    sed -i "s|^Exec=.*|Exec=\"$BIN\" --minimized|" "$AUTOSTART"
+fi
+
+echo "==> Removing old device permissions and installing the safety rule"
+# This replaces the old rules that gave every program direct device access. The new file
+# grants no access at all; it only records the RAM safety-lock state at boot (see README).
+"$BIN" --print-udev-rules | sudo tee /etc/udev/rules.d/60-rgbforge.rules >/dev/null
+# i2c-dev exposes I2C buses as device files, which only the hardware service may open.
 echo i2c-dev | sudo tee /etc/modules-load.d/rgbforge-i2c.conf >/dev/null
 sudo modprobe i2c-dev
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 
+echo "==> Installing and starting the hardware service (rgbforge-helper)"
+sudo install -o root -g root -m 644 packaging/rgbforge-helper.service /etc/systemd/system/rgbforge-helper.service
+sudo systemctl daemon-reload
+sudo systemctl enable rgbforge-helper >/dev/null
+sudo systemctl restart rgbforge-helper
+
 echo
-echo "Done! Open \"RGB Forge\" from your app menu, or run: rgbforge"
-case ":$PATH:" in *":$HOME/.local/bin:"*) ;; *) echo "(Add ~/.local/bin to your PATH to run it from a terminal.)";; esac
+if systemctl is-active --quiet rgbforge-helper; then
+    echo "Done! The hardware service is running."
+else
+    echo "Installed, but the hardware service didn't start. See: systemctl status rgbforge-helper"
+fi
+echo "Open \"RGB Forge\" from your app menu, or run: rgbforge"
+echo "If you used an older version, restart your PC once so the old device permissions are fully removed."
