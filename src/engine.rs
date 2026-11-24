@@ -65,6 +65,8 @@ pub struct Status {
     pub scanning: bool,
     /// Smoothed music level 0..=1 (for previews).
     pub audio_level: f32,
+    /// Current temperatures (°C) for the Temperature effect, if sensors were found.
+    pub temps: crate::sensors::Temps,
     /// Set when Music is in use but no audio could be captured.
     pub audio_problem: Option<String>,
 }
@@ -161,6 +163,8 @@ fn run(
     let mut audio: Option<crate::audio::Audio> = None;
     let mut audio_failed = false;
     let mut env = 0.0f32;
+    let mut temps = crate::sensors::read();
+    let mut temps_read = Instant::now();
 
     loop {
         let frame_start = Instant::now();
@@ -198,9 +202,22 @@ fn run(
         }
         let raw = audio.as_ref().map_or(0.0, |a| a.level());
         env = smooth_audio(env, raw, frame_time.as_secs_f32());
+        // Temperatures change slowly; read the sensor files once a second and ease toward
+        // new readings so colours glide instead of stepping.
+        if temps_read.elapsed() >= Duration::from_secs(1) {
+            let fresh = crate::sensors::read();
+            let ease = |old: Option<f32>, new: Option<f32>| match (old, new) {
+                (Some(o), Some(n)) => Some(o + (n - o) * 0.5),
+                (_, n) => n,
+            };
+            temps = crate::sensors::Temps { cpu: ease(temps.cpu, fresh.cpu), gpu: ease(temps.gpu, fresh.gpu) };
+            temps_read = Instant::now();
+        }
+        let inputs = effects::Inputs { audio: env, cpu_temp: temps.cpu, gpu_temp: temps.gpu };
         {
             let mut s = lock(&status);
             s.audio_level = env;
+            s.temps = temps;
             s.audio_problem = (wants_music && audio_failed).then(|| {
                 "Music effect: couldn't listen to your PC's sound. Install the 'libpulse' package (provides parec).".to_string()
             });
@@ -220,7 +237,7 @@ fn run(
                 let n = usize::from(z.leds);
                 // Phase is the position across *all* devices, so waves flow PC-wide.
                 let phase = offset as f32 / total_leds as f32;
-                effects::render(&lighting, t, phase, env, n, &mut buf);
+                effects::render(&lighting, t, phase, &inputs, n, &mut buf);
                 frame.push(buf.clone());
                 offset = offset.saturating_add(n);
             }

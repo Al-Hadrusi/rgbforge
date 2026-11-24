@@ -16,11 +16,29 @@ pub enum Effect {
     Wave,
     Comet,
     Music,
+    Temperature,
     Off,
 }
 
+/// Which temperature the Temperature effect follows.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash, Serialize, Deserialize)]
+pub enum TempSource {
+    #[default]
+    Cpu,
+    Gpu,
+}
+
+/// Live inputs some effects react to.
+#[derive(Clone, Copy, Debug, Default, PartialEq)]
+pub struct Inputs {
+    /// Smoothed music level 0..=1.
+    pub audio: f32,
+    pub cpu_temp: Option<f32>,
+    pub gpu_temp: Option<f32>,
+}
+
 impl Effect {
-    pub const ALL: [Effect; 8] = [
+    pub const ALL: [Effect; 9] = [
         Effect::Static,
         Effect::Gradient,
         Effect::Breathe,
@@ -28,6 +46,7 @@ impl Effect {
         Effect::Wave,
         Effect::Comet,
         Effect::Music,
+        Effect::Temperature,
         Effect::Off,
     ];
 
@@ -40,6 +59,7 @@ impl Effect {
             Effect::Wave => "Rainbow Wave",
             Effect::Comet => "Comet",
             Effect::Music => "Music",
+            Effect::Temperature => "Temperature",
             Effect::Off => "Off",
         }
     }
@@ -53,16 +73,17 @@ impl Effect {
             Effect::Wave => "A rainbow flowing across your LEDs",
             Effect::Comet => "A bright spot gliding around",
             Effect::Music => "Pulses to whatever your PC is playing (first colour when quiet, second on the beat)",
+            Effect::Temperature => "Cool colour when your CPU or GPU is cool, hot colour when it heats up",
             Effect::Off => "All LEDs off",
         }
     }
 
     pub fn uses_color(self) -> bool {
-        matches!(self, Effect::Static | Effect::Gradient | Effect::Breathe | Effect::Comet | Effect::Music)
+        matches!(self, Effect::Static | Effect::Gradient | Effect::Breathe | Effect::Comet | Effect::Music | Effect::Temperature)
     }
 
     pub fn uses_second_color(self) -> bool {
-        matches!(self, Effect::Gradient | Effect::Music)
+        matches!(self, Effect::Gradient | Effect::Music | Effect::Temperature)
     }
 
     /// Whether the Speed slider means anything for this effect.
@@ -85,6 +106,11 @@ pub struct Lighting {
     pub speed: f32,
     /// 0 ..= 1
     pub brightness: f32,
+    pub temp_source: TempSource,
+    /// °C at which the first ("cool") colour shows fully.
+    pub temp_low: f32,
+    /// °C at which the second ("hot") colour shows fully.
+    pub temp_high: f32,
 }
 
 impl Default for Lighting {
@@ -95,14 +121,18 @@ impl Default for Lighting {
             color2: Rgb::new(0, 200, 255),
             speed: 3.0,
             brightness: 0.8,
+            temp_source: TempSource::Cpu,
+            temp_low: 40.0,
+            temp_high: 80.0,
         }
     }
 }
 
 /// Fill `out` with `n` colours at time `t` seconds. `phase` (0..1) shifts
 /// the pattern so neighbouring zones/devices continue the same wave.
-/// `audio` (0..1) is the smoothed music level, used by the Music effect.
-pub fn render(l: &Lighting, t: f32, phase: f32, audio: f32, n: usize, out: &mut Vec<Rgb>) {
+/// `inputs` carries the music level and temperatures some effects react to.
+pub fn render(l: &Lighting, t: f32, phase: f32, inputs: &Inputs, n: usize, out: &mut Vec<Rgb>) {
+    let audio = inputs.audio;
     out.clear();
     let speed = finite_or(l.speed, 3.0).clamp(1.0, 10.0);
     let n_f = n.max(1) as f32;
@@ -121,6 +151,13 @@ pub fn render(l: &Lighting, t: f32, phase: f32, audio: f32, n: usize, out: &mut 
             out.resize(n, scale(l.color, level));
         }
         Effect::Rainbow => out.resize(n, hsv(t * 12.0 * speed, 1.0, 1.0)),
+        Effect::Temperature => {
+            let temp = match l.temp_source {
+                TempSource::Cpu => inputs.cpu_temp,
+                TempSource::Gpu => inputs.gpu_temp,
+            };
+            out.resize(n, lerp(l.color, l.color2, temp_fraction(temp, l.temp_low, l.temp_high)));
+        }
         Effect::Music => {
             // Never fully dark (floor 0.12): the engine also limits how fast this can fall,
             // so beats pulse rather than strobe.
@@ -145,6 +182,16 @@ pub fn render(l: &Lighting, t: f32, phase: f32, audio: f32, n: usize, out: &mut 
             *c = scale(*c, b);
         }
     }
+}
+
+/// 0 at/below `low`, 1 at/above `high` (no sensor → 0, the cool colour).
+pub fn temp_fraction(temp: Option<f32>, low: f32, high: f32) -> f32 {
+    let (low, high) = (finite_or(low, 40.0), finite_or(high, 80.0));
+    let Some(t) = temp.filter(|t| t.is_finite()) else { return 0.0 };
+    if high <= low {
+        return if t >= high { 1.0 } else { 0.0 };
+    }
+    ((t - low) / (high - low)).clamp(0.0, 1.0)
 }
 
 fn finite_or(v: f32, default: f32) -> f32 {
@@ -216,7 +263,7 @@ mod tests {
             for n in [0, 1, 2, 7, 204] {
                 for t in [0.0, 1.5, 1e9, f32::NAN] {
                     let l = Lighting { effect, speed: f32::NAN, ..Default::default() };
-                    render(&l, t, 0.3, 0.5, n, &mut out);
+                    render(&l, t, 0.3, &Inputs { audio: 0.5, ..Default::default() }, n, &mut out);
                     assert_eq!(out.len(), n);
                 }
             }
@@ -227,17 +274,33 @@ mod tests {
     fn brightness_and_off() {
         let mut out = Vec::new();
         let l = Lighting { effect: Effect::Static, color: Rgb::WHITE, brightness: 0.0, ..Default::default() };
-        render(&l, 0.0, 0.0, 0.0, 3, &mut out);
+        render(&l, 0.0, 0.0, &Inputs { audio: 0.0, ..Default::default() }, 3, &mut out);
         assert!(out.iter().all(|c| *c == Rgb::BLACK));
         let l = Lighting { effect: Effect::Off, brightness: 1.0, ..Default::default() };
-        render(&l, 0.0, 0.0, 0.0, 3, &mut out);
+        render(&l, 0.0, 0.0, &Inputs { audio: 0.0, ..Default::default() }, 3, &mut out);
         assert!(out.iter().all(|c| *c == Rgb::BLACK));
         // Music: quiet shows a dim first colour, loud shows the full second colour.
         let l = Lighting { effect: Effect::Music, color: Rgb::new(255, 0, 0), color2: Rgb::new(0, 0, 255), brightness: 1.0, ..Default::default() };
-        render(&l, 0.0, 0.0, 1.0, 1, &mut out);
+        render(&l, 0.0, 0.0, &Inputs { audio: 1.0, ..Default::default() }, 1, &mut out);
         assert_eq!(out, vec![Rgb::new(0, 0, 255)]);
-        render(&l, 0.0, 0.0, 0.0, 1, &mut out);
+        render(&l, 0.0, 0.0, &Inputs { audio: 0.0, ..Default::default() }, 1, &mut out);
         assert!(out.first().is_some_and(|c| c.r > 0 && c.r < 60 && c.b == 0));
+    }
+
+    #[test]
+    fn temperature_blends_cool_to_hot() {
+        let mut out = Vec::new();
+        let l = Lighting { effect: Effect::Temperature, color: Rgb::new(0, 0, 255), color2: Rgb::new(255, 0, 0), brightness: 1.0, ..Default::default() };
+        let at = |cpu: Option<f32>, out: &mut Vec<Rgb>| {
+            render(&l, 0.0, 0.0, &Inputs { cpu_temp: cpu, ..Default::default() }, 1, out);
+            out.first().copied()
+        };
+        assert_eq!(at(Some(30.0), &mut out), Some(Rgb::new(0, 0, 255))); // below 40 °C: cool
+        assert_eq!(at(Some(90.0), &mut out), Some(Rgb::new(255, 0, 0))); // above 80 °C: hot
+        assert_eq!(at(Some(60.0), &mut out), Some(lerp(Rgb::new(0, 0, 255), Rgb::new(255, 0, 0), 0.5)));
+        assert_eq!(at(None, &mut out), Some(Rgb::new(0, 0, 255))); // no sensor: cool colour
+        assert_eq!(temp_fraction(Some(f32::NAN), 40.0, 80.0), 0.0);
+        assert_eq!(temp_fraction(Some(50.0), 60.0, 60.0), 0.0); // equal thresholds don't divide by zero
     }
 
     #[test]

@@ -499,7 +499,8 @@ impl App<'_> {
             ui.spacing_mut().item_spacing = Vec2::splat(10.0);
             for e in Effect::ALL {
                 let preview = Lighting { effect: e, ..lighting };
-                if effect_card(ui, e, &preview, lighting.effect == e, t, self.status.audio_level).clicked() {
+                let inputs = effects::Inputs { audio: self.status.audio_level, cpu_temp: self.status.temps.cpu, gpu_temp: self.status.temps.gpu };
+                if effect_card(ui, e, &preview, lighting.effect == e, t, &inputs).clicked() {
                     self.lighting_mut().effect = e;
                 }
             }
@@ -536,6 +537,10 @@ impl App<'_> {
             l.brightness = pct / 100.0;
             if l.effect.uses_speed() {
                 labeled_slider(ui, "Speed", &mut l.speed, 1.0..=10.0, "", "Slow", "Fast");
+            }
+            if l.effect == Effect::Temperature {
+                let temps = self.status.temps;
+                temperature_controls(ui, self.lighting_mut(), temps);
             }
             ui.add_space(16.0);
         }
@@ -920,7 +925,7 @@ fn device_card(
     resp.on_hover_cursor(egui::CursorIcon::PointingHand)
 }
 
-fn effect_card(ui: &mut Ui, effect: Effect, lighting: &Lighting, selected: bool, t: f32, audio: f32) -> egui::Response {
+fn effect_card(ui: &mut Ui, effect: Effect, lighting: &Lighting, selected: bool, t: f32, inputs: &effects::Inputs) -> egui::Response {
     let (rect, resp) = ui.allocate_exact_size(Vec2::new(150.0, 86.0), Sense::click());
     let p = ui.painter();
     let bg = if selected { CARD_HOVER } else if resp.hovered() { Color32::from_rgb(33, 38, 50) } else { CARD };
@@ -931,7 +936,7 @@ fn effect_card(ui: &mut Ui, effect: Effect, lighting: &Lighting, selected: bool,
     p.text(Pos2::new(rect.left() + 12.0, rect.top() + 10.0), egui::Align2::LEFT_TOP, effect.label(), FontId::proportional(15.0), TEXT);
     let mut buf = Vec::new();
     let preview = Lighting { brightness: lighting.brightness.max(0.6), ..*lighting };
-    effects::render(&preview, t, 0.0, audio, 10, &mut buf);
+    effects::render(&preview, t, 0.0, inputs, 10, &mut buf);
     for (i, c) in buf.iter().enumerate() {
         let center = Pos2::new(rect.left() + 18.0 + i as f32 * 12.6, rect.bottom() - 22.0);
         p.circle_filled(center, 8.0, c32(*c).gamma_multiply(0.25));
@@ -1177,4 +1182,39 @@ fn hsv_picker(ui: &mut Ui, color: &mut Rgb) -> bool {
     }
     ui.data_mut(|d| d.insert_temp(id, (h, *color)));
     changed
+}
+
+/// Sensor choice, live reading and cool/hot points for the Temperature effect.
+fn temperature_controls(ui: &mut Ui, l: &mut Lighting, temps: crate::sensors::Temps) {
+    use crate::effects::TempSource;
+    let fmt = |t: Option<f32>| t.map_or("not found".to_string(), |c| format!("{c:.0} °C"));
+    ui.horizontal(|ui| {
+        ui.add_sized([90.0, 24.0], egui::Label::new(RichText::new("Follow").color(TEXT)));
+        for (src, name, reading) in [(TempSource::Cpu, "CPU", temps.cpu), (TempSource::Gpu, "Graphics card", temps.gpu)] {
+            let label = format!("{name} · {}", fmt(reading));
+            if ui.selectable_label(l.temp_source == src, label).clicked() {
+                l.temp_source = src;
+            }
+        }
+    });
+    let current = match l.temp_source {
+        TempSource::Cpu => temps.cpu,
+        TempSource::Gpu => temps.gpu,
+    };
+    if current.is_none() {
+        ui.label(
+            RichText::new("No sensor found for this, so the cool colour is shown. (NVIDIA's own driver doesn't share GPU temperatures with other apps.)")
+                .small()
+                .color(WARN),
+        );
+    }
+    labeled_slider(ui, "Cool at", &mut l.temp_low, 20.0..=90.0, " °C", "", "");
+    labeled_slider(ui, "Hot at", &mut l.temp_high, 30.0..=100.0, " °C", "", "");
+    // Keep at least 5 °C between the two points.
+    if l.temp_high < l.temp_low + 5.0 {
+        l.temp_high = (l.temp_low + 5.0).min(100.0);
+        l.temp_low = l.temp_low.min(l.temp_high - 5.0);
+    }
+    let pct = effects::temp_fraction(current, l.temp_low, l.temp_high);
+    ui.label(RichText::new(format!("Right now: {:.0}% of the way from cool to hot", pct * 100.0)).small().color(DIM));
 }

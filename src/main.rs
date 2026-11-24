@@ -13,6 +13,7 @@ mod hidraw;
 mod model;
 mod proto;
 mod remote;
+mod sensors;
 mod ui;
 
 use std::io::Write;
