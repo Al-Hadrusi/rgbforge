@@ -15,6 +15,15 @@ No OpenRGB, no background services, no root.
 
 ## Install
 
+**Easiest:** download the ready-made `rgbforge-…-x86_64-linux.tar.gz` from
+[Releases](https://github.com/Al-Hadrusi/rgbforge/releases/latest), then:
+
+```bash
+tar -xzf rgbforge-*-x86_64-linux.tar.gz && cd rgbforge-*-x86_64-linux && ./install.sh
+```
+
+**From source** (needs Rust):
+
 ```bash
 ./install.sh
 ```

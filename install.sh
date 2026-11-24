@@ -17,11 +17,23 @@ fi
 
 BIN=/usr/local/bin/rgbforge
 
-echo "==> Building (this takes a minute the first time)…"
-cargo build --release
+if [ -x ./rgbforge ] && [ ! -f Cargo.toml ]; then
+    # Release download: the program is already built.
+    SRC=./rgbforge
+    echo "==> Using the included program"
+else
+    if ! command -v cargo >/dev/null; then
+        echo "Rust isn't installed. Either download the ready-made release from"
+        echo "https://github.com/Al-Hadrusi/rgbforge/releases, or install Rust (https://rustup.rs) and try again."
+        exit 1
+    fi
+    echo "==> Building (this takes a minute the first time)…"
+    cargo build --release
+    SRC=target/release/rgbforge
+fi
 
 echo "==> Installing the program to $BIN (root-owned, so no other program can tamper with it)"
-sudo install -o root -g root -m 755 target/release/rgbforge "$BIN"
+sudo install -o root -g root -m 755 "$SRC" "$BIN"
 # Older versions lived in a folder your user can write to; remove that copy.
 rm -f "$HOME/.local/bin/rgbforge"
 
@@ -38,7 +50,7 @@ fi
 echo "==> Removing old device permissions and installing the safety rule"
 # This replaces the old rules that gave every program direct device access. The new file
 # grants no access at all; it only records the RAM safety-lock state at boot (see README).
-"$BIN" --print-udev-rules | sudo tee /etc/udev/rules.d/60-rgbforge.rules >/dev/null
+"$SRC" --print-udev-rules | sudo tee /etc/udev/rules.d/60-rgbforge.rules >/dev/null
 # i2c-dev exposes I2C buses as device files, which only the hardware service may open.
 echo i2c-dev | sudo tee /etc/modules-load.d/rgbforge-i2c.conf >/dev/null
 sudo modprobe i2c-dev
