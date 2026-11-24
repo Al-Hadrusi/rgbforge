@@ -65,8 +65,8 @@ pub fn run() -> ExitCode {
             cl.fetch_sub(1, Ordering::SeqCst);
         });
         if spawned.is_err() {
-            // Couldn't start a thread for this client: give its slot back.
-            let _ = clients.fetch_update(Ordering::SeqCst, Ordering::SeqCst, |n| n.checked_sub(1));
+            // Couldn't start a thread for this client: give back the slot taken above.
+            clients.fetch_sub(1, Ordering::SeqCst);
         }
     }
     ExitCode::SUCCESS

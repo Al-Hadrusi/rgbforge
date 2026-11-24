@@ -115,7 +115,8 @@ fn analyse(mut src: impl Read, level: &AtomicU32, dead: &AtomicBool) {
     let mut a = Analyser::default();
     while src.read_exact(&mut bytes).is_ok() {
         samples.clear();
-        samples.extend(bytes.chunks_exact(2).map(|b| f32::from(i16::from_le_bytes(<[u8; 2]>::try_from(b).unwrap_or([0, 0]))) / 32768.0));
+        let (pairs, _) = bytes.as_chunks::<2>();
+        samples.extend(pairs.iter().map(|b| f32::from(i16::from_le_bytes(*b)) / 32768.0));
         level.store(a.block(&samples).to_bits(), Ordering::Relaxed);
     }
     level.store(0f32.to_bits(), Ordering::Relaxed);
