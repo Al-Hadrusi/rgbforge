@@ -1,0 +1,47 @@
+[Unit]
+Description=RGB Forge hardware service (the only process allowed to touch RGB lighting hardware)
+Documentation=https://github.com/Al-Hadrusi/rgbforge
+After=systemd-udevd.service systemd-modules-load.service
+
+[Service]
+Type=simple
+ExecStart=/usr/local/bin/rgbforge --helper
+Restart=on-failure
+RestartSec=2
+
+# Runs as root only so it can open device nodes owned by root. All other root powers
+# are taken away below: it has no capabilities, no network, no access to home folders,
+# a read-only view of the system, and can only reach I2C and USB-HID device nodes.
+CapabilityBoundingSet=
+AmbientCapabilities=
+NoNewPrivileges=yes
+DevicePolicy=closed
+DeviceAllow=char-i2c rw
+DeviceAllow=char-hidraw rw
+PrivateNetwork=yes
+IPAddressDeny=any
+RestrictAddressFamilies=AF_UNIX
+ProtectSystem=strict
+ProtectHome=yes
+PrivateTmp=yes
+ProtectKernelModules=yes
+ProtectKernelLogs=yes
+ProtectKernelTunables=yes
+ProtectControlGroups=yes
+ProtectClock=yes
+ProtectHostname=yes
+RestrictNamespaces=yes
+RestrictRealtime=yes
+RestrictSUIDSGID=yes
+LockPersonality=yes
+MemoryDenyWriteExecute=yes
+SystemCallArchitectures=native
+SystemCallFilter=@system-service
+SystemCallFilter=~@privileged @resources @mount @swap @reboot @raw-io @module @debug @obsolete @cpu-emulation
+RemoveIPC=yes
+UMask=0077
+RuntimeDirectory=rgbforge-helper
+RuntimeDirectoryMode=0755
+
+[Install]
+WantedBy=multi-user.target

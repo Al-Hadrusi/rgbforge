@@ -8,31 +8,38 @@ mod tray;
 mod drivers;
 mod effects;
 mod engine;
+mod helper;
 mod hidraw;
 mod model;
+mod proto;
+mod remote;
 mod ui;
 
 use std::io::Write;
 use std::process::ExitCode;
 
 fn udev_rules() -> String {
-    let mut out = String::from(
-        "# RGB Forge: let the logged-in user access these RGB lighting controllers (and nothing else).\n",
-    );
-    for s in drivers::SUPPORTED {
-        out.push_str(&format!(
-            "# {}\nSUBSYSTEM==\"hidraw\", ATTRS{{idVendor}}==\"{:04x}\", ATTRS{{idProduct}}==\"{:04x}\", TAG+=\"uaccess\"\n",
-            s.name, s.vid, s.pid
-        ));
-    }
-    out.push_str("# Sapphire Nitro+ RX 9070 XT: only the GPU's dedicated RGB I2C bus, no other I2C bus\n");
-    out.push_str("SUBSYSTEM==\"i2c-dev\", KERNEL==\"i2c-[0-9]*\", ATTR{name}==\"AMDGPU DM i2c OEM bus*\", TAG+=\"uaccess\"\n");
-    out.push_str("# G.Skill RAM lighting: the chipset SMBus. RGB Forge additionally refuses to use it unless\n");
-    out.push_str("# the chipset's SPD Write Disable lock is on (hardware-blocks writes to memory-settings chips).\n");
-    out.push_str("SUBSYSTEM==\"i2c-dev\", KERNEL==\"i2c-[0-9]*\", ATTR{name}==\"SMBus I801 adapter*\", TAG+=\"uaccess\"\n");
+    // No user access to any device: only the rgbforge-helper service (root, sandboxed) touches
+    // hardware. This single rule lets that service check the chipset's SPD Write Disable lock
+    // without needing extra privileges: at boot, udev (as root) copies one PCI config byte to /run.
+    let mut out = String::from("# RGB Forge: no device permissions are granted to users; rgbforge-helper does all hardware access.\n");
     out.push_str("# Each boot, as root, copy the SMBus HOSTC byte (holds the SPD Write Disable bit) to /run for RGB Forge to check.\n");
     out.push_str("ACTION==\"add|change|bind\", SUBSYSTEM==\"pci\", DRIVER==\"i801_smbus\", RUN+=\"/bin/sh -c 'mkdir -p /run/rgbforge && od -An -tx1 -j64 -N1 /sys%p/config > /run/rgbforge/smbus-hostc-%k'\"\n");
     out
+}
+
+/// Run a read-only check in the hardware service, or directly if that isn't available.
+fn run_check(what: proto::Check) -> String {
+    match remote::check(what) {
+        Ok(t) => t,
+        Err(_) => {
+            let local = match what {
+                proto::Check::Gpu => drivers::sapphire::check_report(),
+                proto::Check::Ram => drivers::ene_ram::check_report(),
+            };
+            format!("(The hardware service isn't running; checking directly.)\n{local}")
+        }
+    }
 }
 
 fn main() -> ExitCode {
@@ -43,6 +50,7 @@ fn main() -> ExitCode {
     let mut minimized = false;
     match args.first().map(String::as_str) {
         Some("--minimized") => minimized = true,
+        Some("--helper") => return helper::run(),
         Some("--list-devices") => {
             println!("USB devices RGB Forge can see but doesn't support yet (send these IDs to request a driver):");
             for line in drivers::unsupported_usb() {
@@ -68,11 +76,11 @@ fn main() -> ExitCode {
             return ExitCode::SUCCESS;
         }
         Some("--ram-check") => {
-            print!("{}", drivers::ene_ram::check_report());
+            print!("{}", run_check(proto::Check::Ram));
             return ExitCode::SUCCESS;
         }
         Some("--gpu-check") => {
-            print!("{}", drivers::sapphire::check_report());
+            print!("{}", run_check(proto::Check::Gpu));
             return ExitCode::SUCCESS;
         }
         Some("--print-udev-rules") => {
@@ -140,7 +148,9 @@ mod tests {
     #[test]
     fn udev_rules_cover_allow_list() {
         let r = super::udev_rules();
-        assert!(r.contains("idVendor}==\"0b05\", ATTRS{idProduct}==\"1867\""));
-        assert_eq!(r.matches("TAG+=\"uaccess\"").count(), crate::drivers::SUPPORTED.len() + 2);
+        // Users must not get raw device access any more: only the helper touches hardware.
+        assert!(!r.contains("uaccess"));
+        assert!(!r.contains("MODE="));
+        assert!(r.contains("i801_smbus"));
     }
 }

@@ -135,6 +135,11 @@ pub enum DemoMode {
     Never,
 }
 
+/// The simulated devices (added by the app, never by the hardware service).
+pub fn demo_devices() -> Vec<Box<dyn Driver>> {
+    demo::devices()
+}
+
 pub struct Detection {
     pub drivers: Vec<Box<dyn Driver>>,
     /// Human-readable problems (e.g. "found X but no permission").
@@ -203,7 +208,7 @@ pub fn detect_from(hids: Vec<HidInfo>, demo: DemoMode) -> Detection {
         match result {
             Ok(d) => drivers.push(d),
             Err(e) if e.kind() == io::ErrorKind::PermissionDenied => problems.push(format!(
-                "Found {} but Linux won't let this app use it yet. Open Help → \"Device not showing up\" for the one-time fix.",
+                "Found {} but couldn't open it (no permission). Make sure the rgbforge-helper service is running (see Help).",
                 sup.name
             )),
             Err(e) => problems.push(format!("Found {} but couldn't open it: {e}", sup.name)),

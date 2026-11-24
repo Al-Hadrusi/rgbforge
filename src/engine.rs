@@ -11,7 +11,7 @@ use std::time::{Duration, Instant};
 
 use serde::{Deserialize, Serialize};
 
-use crate::drivers::{self, DemoMode, Driver};
+use crate::drivers::{DemoMode, Driver};
 use crate::effects::{self, Lighting};
 use crate::model::{DeviceInfo, Rgb};
 
@@ -126,7 +126,7 @@ struct Slot {
 
 fn scan(demo: DemoMode, gpu: bool, ram: bool, sizes: &HashMap<String, Vec<u16>>, status: &Mutex<Status>) -> Vec<Slot> {
     lock(status).scanning = true;
-    let found = drivers::detect(demo, gpu, ram);
+    let found = crate::remote::detect(demo, gpu, ram);
     let slots: Vec<Slot> = found
         .drivers
         .into_iter()
