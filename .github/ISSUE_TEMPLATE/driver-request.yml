@@ -40,7 +40,7 @@ body:
     id: openrgb
     attributes:
       label: Does OpenRGB or liquidctl support it?
-      description: Optional, but it helps: their published protocol research is where drivers start.
+      description: "Optional, but it helps: their published protocol research is where drivers start."
   - type: checkboxes
     id: test
     attributes:
