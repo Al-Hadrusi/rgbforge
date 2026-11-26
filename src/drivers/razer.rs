@@ -149,13 +149,7 @@ pub(crate) fn show_frame_packet(model: &Model) -> [u8; REPORT] {
 
 /// Process names of other Razer tools that would talk to the same device.
 pub fn conflicting_tool_running() -> Option<&'static str> {
-    let names: Vec<String> = std::fs::read_dir("/proc")
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| std::fs::read_to_string(e.path().join("comm")).ok())
-        .map(|c| c.trim().to_ascii_lowercase())
-        .collect();
+    let names = super::trusted_process_names();
     if names.iter().any(|n| n.starts_with("openrazer")) {
         Some("OpenRazer")
     } else if names.iter().any(|n| n == "openrgb") {

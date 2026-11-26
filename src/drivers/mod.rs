@@ -136,6 +136,52 @@ pub enum DemoMode {
     Never,
 }
 
+/// Lower-cased names of processes run by root or by members of the `rgbforge` group.
+/// Used to avoid fighting other RGB tools over a device; processes of other accounts are
+/// ignored, so they can't pause RGB Forge just by naming a process "openrgb".
+pub fn trusted_process_names() -> Vec<String> {
+    let group = std::fs::read_to_string("/etc/group").unwrap_or_default();
+    let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+    let uids = trusted_uids(&group, &passwd);
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let status = std::fs::read_to_string(e.path().join("status")).ok()?;
+            uids.contains(&real_uid(&status)?).then_some(())?;
+            Some(std::fs::read_to_string(e.path().join("comm")).ok()?.trim().to_ascii_lowercase())
+        })
+        .collect()
+}
+
+/// root, plus every account in the `rgbforge` group (listed members or primary group).
+pub(crate) fn trusted_uids(group: &str, passwd: &str) -> Vec<u32> {
+    let mut uids = vec![0];
+    let Some((gid, members)) = group.lines().find_map(|l| {
+        let f: Vec<&str> = l.split(':').collect();
+        (f.first() == Some(&"rgbforge")).then(|| (f.get(2).copied().unwrap_or(""), f.get(3).copied().unwrap_or("")))
+    }) else {
+        return uids;
+    };
+    let members: Vec<&str> = members.split(',').filter(|m| !m.is_empty()).collect();
+    for l in passwd.lines() {
+        let f: Vec<&str> = l.split(':').collect();
+        let (Some(name), Some(uid), Some(pgid)) = (f.first(), f.get(2), f.get(3)) else { continue };
+        if (members.contains(name) || *pgid == gid)
+            && let Ok(u) = uid.parse()
+        {
+            uids.push(u);
+        }
+    }
+    uids
+}
+
+/// The real uid from a /proc/<pid>/status text.
+pub(crate) fn real_uid(status: &str) -> Option<u32> {
+    status.lines().find_map(|l| l.strip_prefix("Uid:")).and_then(|v| v.split_whitespace().next()).and_then(|v| v.parse().ok())
+}
+
 /// The simulated devices (added by the app, never by the hardware service).
 pub fn demo_devices() -> Vec<Box<dyn Driver>> {
     demo::devices()
@@ -296,6 +342,18 @@ mod tests {
     fn demo_mode() {
         assert!(!detect_from(vec![], DemoMode::Auto).drivers.is_empty());
         assert!(detect_from(vec![], DemoMode::Never).drivers.is_empty());
+    }
+
+    #[test]
+    fn only_root_and_rgbforge_members_are_trusted() {
+        let group = "root:x:0:\nrgbforge:x:977:alice,bob\nwheel:x:10:carol\n";
+        let passwd = "root:x:0:0::/root:/bin/sh\nalice:x:1000:1000::/h:/bin/sh\nbob:x:1001:1001::/h:/bin/sh\ncarol:x:1002:1002::/h:/bin/sh\nsvc:x:990:977::/:/bin/false\n";
+        let mut u = trusted_uids(group, passwd);
+        u.sort_unstable();
+        assert_eq!(u, vec![0, 990, 1000, 1001]); // carol (other account) is not trusted
+        assert_eq!(trusted_uids("", ""), vec![0]);
+        assert_eq!(real_uid("Name:\topenrgb\nUid:\t1002\t1002\t1002\t1002\n"), Some(1002));
+        assert_eq!(real_uid("garbage"), None);
     }
 
     #[test]

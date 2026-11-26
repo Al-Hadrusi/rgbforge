@@ -24,7 +24,6 @@
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::process::Command;
 
 use i2cdev::core::I2CDevice;
 use i2cdev::linux::LinuxI2CDevice;
@@ -75,14 +74,24 @@ pub fn parse_hostc(text: &str) -> Option<u8> {
 /// Is the chipset's SPD Write Disable lock on? `None` = couldn't find out.
 pub fn spd_write_disabled() -> Option<bool> {
     // 1. Authoritative: the hardware register itself, captured by root at boot.
+    // There is deliberately no fallback: kernel log text can be influenced (e.g. by USB
+    // device names), so only the register value itself counts as evidence.
     let captured = bus_pci_name()
-        .and_then(|pci| fs::read_to_string(Path::new(HOSTC_DIR).join(format!("smbus-hostc-{pci}"))).ok())
-        .and_then(|t| parse_hostc(&t));
-    if let Some(b) = captured {
-        return Some(b & HOSTC_SPD_WD != 0);
-    }
-    // 2. Fallback: i2c-i801 prints "SPD Write Disable is set" at boot on some kernels.
-    spd_write_disabled_from_log()
+        .and_then(|pci| root_owned_read(&Path::new(HOSTC_DIR).join(format!("smbus-hostc-{pci}"))))
+        .and_then(|t| parse_hostc(&t))?;
+    Some(captured & HOSTC_SPD_WD != 0)
+}
+
+/// Read a small file only if it and its folder are root-owned, not links, and writable by
+/// nobody else, so no other account can plant or alter the safety evidence.
+fn root_owned_read(path: &Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let trusted = |m: &fs::Metadata| m.uid() == 0 && m.mode() & 0o022 == 0;
+    let dir = fs::symlink_metadata(path.parent()?).ok()?;
+    let file = fs::symlink_metadata(path).ok()?;
+    (dir.is_dir() && trusted(&dir) && file.file_type().is_file() && trusted(&file) && file.len() <= 64)
+        .then(|| fs::read_to_string(path).ok())
+        .flatten()
 }
 
 /// PCI name (e.g. "0000:00:1f.4") of the chipset SMBus controller.
@@ -94,23 +103,8 @@ fn bus_pci_name() -> Option<String> {
     name.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.').then_some(name)
 }
 
-fn spd_write_disabled_from_log() -> Option<bool> {
-    let out = Command::new("journalctl").args(["-k", "-b", "--no-pager", "-q", "-g", "i801"]).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    if text.contains("SPD Write Disable is set") {
-        return Some(true);
-    }
-    // We can only conclude "off" if we can actually see i801's boot messages.
-    if text.contains("i801") { Some(false) } else { None }
-}
-
 pub fn openrgb_running() -> bool {
-    fs::read_dir("/proc")
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| fs::read_to_string(e.path().join("comm")).ok())
-        .any(|c| c.trim().eq_ignore_ascii_case("openrgb"))
+    super::trusted_process_names().iter().any(|n| n == "openrgb")
 }
 
 /// The single chipset SMBus adapter number. Ambiguity → None.
@@ -364,6 +358,29 @@ mod tests {
         for a in ADDRESSES {
             assert!(!(0x48..=0x5F).contains(&a));
         }
+    }
+
+    #[test]
+    fn evidence_file_must_be_root_owned_and_unwritable_by_others() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("rgbforge-hostc-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let good = dir.join("good");
+        fs::write(&good, " 11\n").unwrap();
+        fs::set_permissions(&good, fs::Permissions::from_mode(0o644)).unwrap();
+        let writable = dir.join("writable");
+        fs::write(&writable, " 11\n").unwrap();
+        fs::set_permissions(&writable, fs::Permissions::from_mode(0o666)).unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&good, &link).unwrap();
+        assert_eq!(root_owned_read(&writable), None, "world-writable file must be refused");
+        assert_eq!(root_owned_read(&link), None, "symlink must be refused");
+        let running_as_root = fs::metadata(&good).map(|m| std::os::unix::fs::MetadataExt::uid(&m) == 0).unwrap_or(false);
+        assert_eq!(root_owned_read(&good).is_some(), running_as_root, "accepted only when root-owned");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(root_owned_read(&good), None, "writable folder must be refused");
+        fs::remove_dir_all(&dir).ok();
     }
 
     #[test]
