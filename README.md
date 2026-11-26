@@ -143,8 +143,9 @@ on some coolers, pump control). Now:
 - **No device permissions for users.** The udev rule grants nothing; device nodes stay root-only.
 - **A narrow service.** `rgbforge-helper` (systemd) accepts only *list devices*, *show these colours*,
   *set an LED count* and *run a read-only check* over a local socket. There is no "send raw bytes"
-  request, and every write still passes the driver's allow-list. Any local program may connect, but
-  the most it can do is change colours. Messages are size-limited and validated; frames are trimmed
+  request, and every write still passes the driver's allow-list. Only root and members of the
+  `rgbforge` group (the installer adds your account) may connect, and even they can only change
+  colours. Messages are size-limited and validated; frames are trimmed
   to each device's real size; rate limits are enforced in the service itself.
 - **Sandboxed.** The service has no capabilities, no network, no access to home folders, a read-only
   system view, can only open I²C and USB-HID device nodes, and runs with a restricted system-call set.

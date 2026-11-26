@@ -4,7 +4,7 @@
 //! One JSON message per line over a Unix socket. The API is deliberately narrow: list
 //! devices, show colours, change an LED count, run a read-only check. There is no way to
 //! send raw bytes to a device; every write still goes through each driver's allow-list.
-//! So even though any local program may connect, the worst it can do is change colours.
+//! Only root and the `rgbforge` group may connect, and even they can only change colours.
 
 use std::io::{self, BufRead, BufReader, Read, Write};
 
