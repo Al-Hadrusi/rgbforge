@@ -11,9 +11,13 @@ cd rgbforge-*-x86_64-linux
 
 3. Restart your PC once, then open **RGB Forge** from your app menu.
 
-Optional: check the download against the `.sha256` file:
+Optional: check the download.
 ```bash
 sha256sum -c rgbforge-*-x86_64-linux.tar.gz.sha256
+```
+To verify it was built by this repository's GitHub workflow (needs the GitHub CLI):
+```bash
+gh attestation verify rgbforge-*-x86_64-linux.tar.gz --repo Al-Hadrusi/rgbforge
 ```
 
 Works on 64-bit (x86_64) Linux distributions from about 2022 onwards (glibc 2.35+) with systemd, including Arch, Fedora, Ubuntu 22.04+ and Debian 12+.
