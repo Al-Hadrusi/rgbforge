@@ -77,7 +77,7 @@ fn request(dev: &mut HidDevice, cmd: u8) -> io::Result<Vec<u8>> {
     for (dst, src) in pkt.iter_mut().zip([REPORT_ID, cmd]) {
         *dst = src;
     }
-    dev.write_report(&pkt)?;
+    send(dev, &pkt)?;
     let mut buf = [0u8; MAX_REPORT];
     let n = dev.read_report(&mut buf, Duration::from_millis(300))?;
     Ok(buf.get(..n).unwrap_or_default().to_vec())
@@ -157,6 +157,31 @@ impl Aura {
     }
 }
 
+/// The complete write allow-list for Aura controllers.
+pub(crate) fn allowed(pkt: &[u8]) -> bool {
+    match pkt {
+        // Read-only queries.
+        [REPORT_ID, CMD_FIRMWARE, ..] | [REPORT_ID, CMD_CONFIG, ..] => true,
+        // Effect selection: only "direct" (software-controlled) mode.
+        [REPORT_ID, CMD_EFFECT, ch, 0, 0, MODE_DIRECT, ..] => *ch <= MAX_ARGB_HEADERS,
+        // Direct colours: a valid channel, at most 20 LEDs, inside the header's LED range.
+        [REPORT_ID, CMD_DIRECT, ch, start, n, ..] => {
+            let ch = ch & !APPLY;
+            (ch <= MAX_ARGB_HEADERS || ch == MAINBOARD_DIRECT_CHANNEL)
+                && usize::from(*n) <= LEDS_PER_PACKET
+                && u16::from(*start) + u16::from(*n) <= MAX_LEDS_PER_HEADER
+        }
+        _ => false,
+    }
+}
+
+fn send(dev: &mut HidDevice, pkt: &[u8]) -> io::Result<()> {
+    if !allowed(pkt) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "blocked non-lighting Aura command"));
+    }
+    dev.write_report(pkt)
+}
+
 pub(crate) fn effect_packet(channel: u8, mode: u8) -> [u8; MAX_REPORT] {
     let mut p = [0u8; MAX_REPORT];
     for (dst, src) in p.iter_mut().zip([REPORT_ID, CMD_EFFECT, channel, 0, 0, mode]) {
@@ -203,13 +228,13 @@ impl Driver for Aura {
     fn apply(&mut self, frame: &[Vec<Rgb>]) -> io::Result<()> {
         if !self.direct_set {
             for ch in &self.channels {
-                self.dev.write_report(&effect_packet(ch.effect, MODE_DIRECT))?;
+                send(&mut self.dev, &effect_packet(ch.effect, MODE_DIRECT))?;
             }
             self.direct_set = true;
         }
         for (ch, colors) in self.channels.iter().zip(frame) {
             for pkt in direct_packets(ch.direct, colors) {
-                self.dev.write_report(&pkt)?;
+                send(&mut self.dev, &pkt)?;
             }
         }
         self.dev.drain();
@@ -233,6 +258,19 @@ mod tests {
         assert_eq!(&p[2][5..8], &[40, 1, 2]);
         assert!(direct_packets(0, &[]).is_empty());
         assert_eq!(&effect_packet(2, MODE_DIRECT)[..6], &[0xEC, 0x35, 2, 0, 0, 0xFF]);
+    }
+
+    #[test]
+    fn only_lighting_packets_pass() {
+        assert!(allowed(&effect_packet(1, MODE_DIRECT)));
+        assert!(!allowed(&effect_packet(1, 0x01)), "hardware effects are not sent");
+        assert!(!allowed(&[0xEC, 0x3F, 0x55]), "save-to-flash command is refused");
+        assert!(!allowed(&[0xEC, 0x40, 0x01, 110, 20]), "beyond the header's LED range");
+        assert!(!allowed(&[0xEC, 0x40, 0x01, 0, 21]), "too many LEDs in one packet");
+        assert!(!allowed(&[0x00, 0x82]) && !allowed(&[]));
+        let colors = vec![Rgb::new(1, 2, 3); 120];
+        assert!(direct_packets(2, &colors).iter().all(|p| allowed(p)));
+        assert!(direct_packets(MAINBOARD_DIRECT_CHANNEL, &colors[..4]).iter().all(|p| allowed(p)));
     }
 
     #[test]

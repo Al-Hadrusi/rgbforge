@@ -197,7 +197,16 @@ struct Ene {
 }
 
 impl Ene {
+    /// Registers the pointer may ever be set to: the name and LED-count reads, direct mode,
+    /// apply and the colour registers. Never the slot/address registers (0x80F8/0x80F9).
+    fn pointer_allowed(&self, reg: u16) -> bool {
+        pointer_ok(reg, self.direct_base, self.leds)
+    }
+
     fn set_pointer(&mut self, reg: u16) -> io::Result<()> {
+        if !self.pointer_allowed(reg) {
+            return Err(refuse(format!("blocked register select {reg:#06x}")));
+        }
         // ENE expects the register address high byte first.
         self.dev.smbus_write_word_data(0x00, reg.swap_bytes()).map_err(err)
     }
@@ -220,6 +229,16 @@ impl Ene {
         self.set_pointer(reg)?;
         self.dev.smbus_write_byte_data(0x01, val).map_err(err)
     }
+}
+
+/// Registers the ENE pointer may be set to (see `Ene::pointer_allowed`).
+pub(crate) fn pointer_ok(reg: u16, direct_base: u16, leds: u8) -> bool {
+    let colours = direct_base..direct_base.saturating_add(u16::from(leds) * 3);
+    (REG_NAME..REG_NAME + 16).contains(&reg)
+        || reg == REG_CONFIG_LED_COUNT
+        || reg == REG_DIRECT_MODE
+        || reg == REG_APPLY
+        || (leds > 0 && colours.contains(&reg))
 }
 
 pub struct EneRam {
@@ -381,6 +400,20 @@ mod tests {
         fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
         assert_eq!(root_owned_read(&good), None, "writable folder must be refused");
         fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn register_select_never_reaches_address_or_save_registers() {
+        // Before identification (no LEDs known): only name and LED-count reads, mode, apply.
+        assert!(pointer_ok(REG_NAME + 5, 0, 0) && pointer_ok(REG_CONFIG_LED_COUNT, 0, 0));
+        assert!(!pointer_ok(REG_DIRECT_V1, 0, 0));
+        // After identification: the stick's own colour registers too, nothing beyond them.
+        assert!(pointer_ok(REG_DIRECT_V1 + 29, REG_DIRECT_V1, 10));
+        assert!(!pointer_ok(REG_DIRECT_V1 + 30, REG_DIRECT_V1, 10));
+        // Slot index / I2C address registers (address remapping) can never be selected.
+        for reg in [0x80F8, 0x80F9, 0x1030, 0x0000, 0xFFFF] {
+            assert!(!pointer_ok(reg, REG_DIRECT_V1, 20), "{reg:#06x}");
+        }
     }
 
     #[test]

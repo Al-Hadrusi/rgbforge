@@ -65,6 +65,20 @@ fn packet(bytes: &[u8]) -> [u8; MAX_REPORT] {
     p
 }
 
+/// The complete write allow-list (report-id byte first). Fan, pump, temperature and
+/// firmware commands of the Commander Pro are unreachable.
+pub(crate) fn allowed(pkt: &[u8]) -> bool {
+    match pkt {
+        [0x00, CMD_RESET, ch, ..] => *ch < 2,
+        [0x00, CMD_PORT_STATE, ch, STATE_SOFTWARE, ..] => *ch < 2,
+        [0x00, CMD_DIRECT, ch, start, n, comp, ..] => {
+            *ch < 2 && *comp < 3 && usize::from(*n) <= VALUES_PER_PACKET && u16::from(*start) + u16::from(*n) <= MAX_LEDS_PER_CHANNEL
+        }
+        [0x00, CMD_COMMIT, 0xFF, ..] => true,
+        _ => false,
+    }
+}
+
 pub(crate) fn direct_packets(channel: u8, colors: &[Rgb]) -> Vec<[u8; MAX_REPORT]> {
     let mut out = Vec::new();
     for component in 0..3u8 {
@@ -88,6 +102,15 @@ pub(crate) fn direct_packets(channel: u8, colors: &[Rgb]) -> Vec<[u8; MAX_REPORT
     out
 }
 
+impl CorsairNode {
+    fn send(&mut self, pkt: &[u8]) -> io::Result<()> {
+        if !allowed(pkt) {
+            return Err(io::Error::new(io::ErrorKind::PermissionDenied, "blocked non-lighting Corsair command"));
+        }
+        self.dev.write_report(pkt)
+    }
+}
+
 impl Driver for CorsairNode {
     fn info(&self) -> &DeviceInfo {
         &self.info
@@ -104,17 +127,17 @@ impl Driver for CorsairNode {
         let channels = u8::try_from(self.info.zones.len()).unwrap_or(0);
         if !self.initialised {
             for ch in 0..channels {
-                self.dev.write_report(&packet(&[CMD_RESET, ch]))?;
-                self.dev.write_report(&packet(&[CMD_PORT_STATE, ch, STATE_SOFTWARE]))?;
+                self.send(&packet(&[CMD_RESET, ch]))?;
+                self.send(&packet(&[CMD_PORT_STATE, ch, STATE_SOFTWARE]))?;
             }
             self.initialised = true;
         }
         for (ch, colors) in (0..channels).zip(frame) {
             for p in direct_packets(ch, colors) {
-                self.dev.write_report(&p)?;
+                self.send(&p)?;
             }
         }
-        self.dev.write_report(&packet(&[CMD_COMMIT, 0xFF]))?;
+        self.send(&packet(&[CMD_COMMIT, 0xFF]))?;
         self.dev.drain();
         Ok(())
     }
@@ -124,6 +147,17 @@ impl Driver for CorsairNode {
 #[allow(clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn fan_and_firmware_commands_are_blocked() {
+        // Commander Pro fan/temperature/firmware commands (0x2x, 0x10-0x1x) and a hardware mode switch.
+        for bad in [&[0x00, 0x23, 0x00][..], &[0x00, 0x24, 0x00, 0x32], &[0x00, 0x11], &[0x00, 0x38, 0x00, 0x01], &[0x00, 0x33, 0x00], &[0x00, 0x32, 0x02, 0, 1, 0], &[0x00, 0x32, 0, 200, 10, 0], &[]] {
+            assert!(!allowed(bad), "{bad:02x?}");
+        }
+        let colors = vec![Rgb::new(1, 2, 3); 204];
+        assert!(direct_packets(1, &colors).iter().all(|p| allowed(p)));
+        assert!(allowed(&packet(&[CMD_COMMIT, 0xFF])));
+    }
 
     #[test]
     fn packets_per_component() {
