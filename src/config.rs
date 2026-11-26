@@ -49,19 +49,31 @@ pub fn autostart_enabled() -> bool {
     autostart_file().is_some_and(|p| p.exists())
 }
 
-pub fn autostart_entry(exe: &std::path::Path) -> String {
-    // Desktop-entry quoting: wrap in double quotes, escape backslash, quote, backtick and dollar.
+pub fn autostart_entry(exe: &std::path::Path) -> io::Result<String> {
+    let path = exe.to_str().ok_or_else(|| io::Error::new(io::ErrorKind::InvalidInput, "program path isn't valid text"))?;
+    // A newline or other control character would let the path add its own keys to the entry.
+    if path.chars().any(char::is_control) {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, "program path contains control characters"));
+    }
+    // Desktop-entry Exec quoting: inside double quotes, `"`, `` ` ``, `$` and `\` take a
+    // backslash; then the string-level escape doubles every backslash; `%` (field codes)
+    // becomes `%%`.
     let mut quoted = String::from("\"");
-    for c in exe.to_string_lossy().chars() {
-        if matches!(c, '\\' | '"' | '`' | '$') {
-            quoted.push('\\');
+    for c in path.chars() {
+        match c {
+            '\\' => quoted.push_str("\\\\\\\\"),
+            '"' | '`' | '$' => {
+                quoted.push_str("\\\\");
+                quoted.push(c);
+            }
+            '%' => quoted.push_str("%%"),
+            _ => quoted.push(c),
         }
-        quoted.push(c);
     }
     quoted.push('"');
-    format!(
+    Ok(format!(
         "[Desktop Entry]\nType=Application\nName=RGB Forge\nComment=Restore your RGB lighting at login\nExec={quoted} --minimized\nIcon=preferences-desktop-color\nTerminal=false\nX-GNOME-Autostart-enabled=true\n"
-    )
+    ))
 }
 
 pub fn set_autostart(on: bool) -> io::Result<()> {
@@ -71,7 +83,7 @@ pub fn set_autostart(on: bool) -> io::Result<()> {
         if let Some(dir) = p.parent() {
             fs::create_dir_all(dir)?;
         }
-        fs::write(&p, autostart_entry(&exe))
+        fs::write(&p, autostart_entry(&exe)?)
     } else {
         match fs::remove_file(&p) {
             Err(e) if e.kind() != io::ErrorKind::NotFound => Err(e),
@@ -127,7 +139,16 @@ mod tests {
 
     #[test]
     fn autostart_entry_quotes_path() {
-        let e = autostart_entry(std::path::Path::new("/home/me/my apps/rgb\"forge"));
-        assert!(e.contains("Exec=\"/home/me/my apps/rgb\\\"forge\" --minimized\n"), "{e}");
+        let e = autostart_entry(std::path::Path::new("/home/me/my apps/rgb\"forge")).unwrap();
+        assert!(e.contains("Exec=\"/home/me/my apps/rgb\\\\\"forge\" --minimized\n"), "{e}");
+        let e = autostart_entry(std::path::Path::new("/opt/100%/a\\b$c")).unwrap();
+        assert!(e.contains("Exec=\"/opt/100%%/a\\\\\\\\b\\\\$c\" --minimized\n"), "{e}");
+    }
+
+    #[test]
+    fn autostart_entry_refuses_injected_lines() {
+        let evil = std::path::Path::new("/tmp/x\nExec=sh -c evil\n");
+        assert!(autostart_entry(evil).is_err());
+        assert!(autostart_entry(std::path::Path::new("/tmp/a\rb")).is_err());
     }
 }
