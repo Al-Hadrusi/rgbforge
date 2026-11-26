@@ -6,7 +6,7 @@
 
 use std::fs::{self, File, OpenOptions};
 use std::io::{self, Read, Write};
-use std::os::unix::fs::OpenOptionsExt;
+use std::os::unix::fs::{FileTypeExt, MetadataExt, OpenOptionsExt};
 use std::path::{Path, PathBuf};
 use std::thread;
 use std::time::{Duration, Instant};
@@ -69,7 +69,10 @@ pub fn parse_uevent(text: &str) -> Option<(u16, u16, String, String)> {
     for line in text.lines() {
         if let Some(v) = line.strip_prefix("HID_ID=") {
             let mut parts = v.split(':');
-            let _bus = parts.next()?;
+            // Only real USB devices (BUS_USB); no Bluetooth, I2C-HID or virtual uhid devices.
+            if parts.next()? != "0003" {
+                return None;
+            }
             let vid = u32::from_str_radix(parts.next()?, 16).ok()?;
             let pid = u32::from_str_radix(parts.next()?, 16).ok()?;
             ids = Some((u16::try_from(vid).ok()?, u16::try_from(pid).ok()?));
@@ -81,6 +84,39 @@ pub fn parse_uevent(text: &str) -> Option<(u16, u16, String, String)> {
     }
     let (vid, pid) = ids?;
     Some((vid, pid, name, phys))
+}
+
+/// `major:minor` from a sysfs `dev` file, encoded like the kernel's `st_rdev`.
+pub fn parse_dev(text: &str) -> Option<u64> {
+    let (major, minor) = text.trim().split_once(':')?;
+    let (major, minor) = (major.parse::<u64>().ok()?, minor.parse::<u64>().ok()?);
+    Some(((major & 0xffff_f000) << 32) | ((major & 0xfff) << 8) | ((minor & 0xffff_ff00) << 12) | (minor & 0xff))
+}
+
+/// Make sure the file we actually opened is still the device we identified in sysfs.
+/// Closes the gap between enumeration and `open()`: a device unplugged in between could
+/// otherwise hand its node name to a different (unvetted) device.
+pub fn verify_opened(info: &HidInfo, file: &File) -> io::Result<()> {
+    verify_opened_in(Path::new("/sys/class/hidraw"), info, file)
+}
+
+pub fn verify_opened_in(sys: &Path, info: &HidInfo, file: &File) -> io::Result<()> {
+    let bad = |why: &str| io::Error::new(io::ErrorKind::PermissionDenied, format!("device changed while opening: {why}"));
+    let meta = file.metadata()?;
+    if !meta.file_type().is_char_device() {
+        return Err(bad("not a device node"));
+    }
+    let node = info.node.file_name().ok_or_else(|| bad("bad node name"))?;
+    let dir = sys.join(node);
+    let expected = fs::read_to_string(dir.join("dev")).ok().and_then(|t| parse_dev(&t));
+    if expected != Some(meta.rdev()) {
+        return Err(bad("device number mismatch"));
+    }
+    let now = fs::read_to_string(dir.join("device/uevent")).ok().and_then(|t| parse_uevent(&t));
+    match now {
+        Some((vid, pid, _, phys)) if vid == info.vid && pid == info.pid && phys == info.phys => Ok(()),
+        _ => Err(bad("different device")),
+    }
 }
 
 /// An open hidraw device. Only drivers for allow-listed VID:PIDs create these.
@@ -95,6 +131,7 @@ impl HidDevice {
             .write(true)
             .custom_flags(O_NONBLOCK)
             .open(&info.node)?;
+        verify_opened(info, &file)?;
         Ok(Self { file })
     }
 
@@ -159,6 +196,31 @@ mod tests {
         assert_eq!(parse_uevent("HID_ID=0003:XYZ:1"), None);
         assert_eq!(parse_uevent("HID_ID=0003:100000000:1"), None);
         assert_eq!(parse_uevent(""), None);
+        // Bluetooth (0005), I2C-HID (0018) and virtual (0006) devices are ignored.
+        for bus in ["0005", "0018", "0006"] {
+            assert_eq!(parse_uevent(&format!("HID_ID={bus}:00000B05:00001867")), None);
+        }
+    }
+
+    #[test]
+    fn device_numbers_match_the_kernel_encoding() {
+        assert_eq!(parse_dev("244:3\n"), Some((244 << 8) | 3));
+        assert_eq!(parse_dev("511:300"), Some((511 << 8) | 44 | (256 << 12)));
+        assert_eq!(parse_dev("x:1"), None);
+        assert_eq!(parse_dev(""), None);
+    }
+
+    #[test]
+    fn a_regular_file_is_never_accepted_as_the_device() {
+        let dir = std::env::temp_dir().join(format!("rgbforge-verify-{}", std::process::id()));
+        let _ = fs::remove_dir_all(&dir);
+        fs::create_dir_all(&dir).unwrap();
+        let fake = dir.join("hidraw0");
+        fs::write(&fake, "").unwrap();
+        let info = HidInfo { node: fake.clone(), vid: 1, pid: 2, name: String::new(), phys: String::new(), descriptor: Vec::new() };
+        let f = File::open(&fake).unwrap();
+        assert!(verify_opened_in(&dir, &info, &f).is_err());
+        let _ = fs::remove_dir_all(&dir);
     }
 
     #[test]

@@ -132,10 +132,20 @@ impl Gigabyte {
 
     pub fn open(hid: &HidInfo, name: &str) -> io::Result<Self> {
         // Check permissions with a plain open first, so the app can explain a missing udev rule.
-        OpenOptions::new().read(true).write(true).open(&hid.node)?;
+        // Plain open first (clear permission errors), then confirm it is the identified device.
+        // Holding this handle while hidapi opens the same node, and re-checking afterwards,
+        // means a swapped device can't slip in between the checks.
+        let probe = OpenOptions::new().read(true).write(true).open(&hid.node)?;
+        crate::hidraw::verify_opened(hid, &probe)?;
         let api = hidapi::HidApi::new().map_err(err)?; // discovery is disabled in main()
         let path = CString::new(hid.node.to_string_lossy().as_bytes()).map_err(err)?;
         let dev = api.open_path(&path).map_err(err)?;
+        crate::hidraw::verify_opened(hid, &probe)?;
+        let now = std::fs::metadata(&hid.node)?;
+        if std::os::unix::fs::MetadataExt::rdev(&now) != std::os::unix::fs::MetadataExt::rdev(&probe.metadata()?) {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "device changed while opening"));
+        }
+        drop(probe);
         let mut me = Self {
             dev,
             info: DeviceInfo {
