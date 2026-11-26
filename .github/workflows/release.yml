@@ -15,16 +15,21 @@ jobs:
     # Built on an older Ubuntu so the program also runs on older distributions (glibc 2.35+).
     runs-on: ubuntu-22.04
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
       - name: Tests (incl. every driver's write allow-list)
         run: cargo test --locked
       - name: Build
         run: cargo build --release --locked
       - name: Package
+        env:
+          # Passed through the environment, never pasted into the script: a tag name
+          # could otherwise inject shell commands (GitHub Actions expression injection).
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          TAG="${{ github.event.release.tag_name }}"
+          case "$TAG" in v[0-9]*) ;; *) echo "Unexpected tag name"; exit 1;; esac
           VERSION="${TAG#v}"
+          case "$VERSION" in *[!0-9A-Za-z.+-]*) echo "Unexpected version characters"; exit 1;; esac
           NAME="rgbforge-${VERSION}-x86_64-linux"
           mkdir -p "$NAME/packaging"
           cp target/release/rgbforge install.sh README.md LICENSE SECURITY.md "$NAME/"
