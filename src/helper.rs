@@ -14,18 +14,65 @@ use std::process::ExitCode;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::{Arc, Mutex, MutexGuard};
 use std::thread;
-use std::time::Instant;
+use std::time::{Duration, Instant};
 
 use crate::drivers::{self, DemoMode, Driver};
 use crate::proto::{self, Check, RemoteDevice, Request, Response};
 
 /// At most this many simultaneous client connections.
 const MAX_CLIENTS: usize = 8;
+/// Idle connections are closed after this long, so idle or stuck clients can't hold the
+/// connection slots forever (the app reconnects automatically when it needs to).
+const IDLE_TIMEOUT: Duration = Duration::from_secs(60);
+/// A client that stops reading replies can't block its connection thread forever.
+const WRITE_TIMEOUT: Duration = Duration::from_secs(5);
+/// Per-connection request budget: sustained rate and burst.
+const REQUESTS_PER_SEC: f32 = 240.0;
+const REQUEST_BURST: f32 = 480.0;
+/// Hardware scans and checks probe buses; allow at most one per this interval (all clients).
+const SCAN_COOLDOWN: Duration = Duration::from_secs(2);
 
 #[derive(Default)]
 struct State {
     drivers: Vec<Box<dyn Driver>>,
     last_write: HashMap<String, Instant>,
+    last_scan: Option<Instant>,
+}
+
+impl State {
+    /// Global cooldown for requests that probe hardware (Detect, Check).
+    fn scan_allowed(&mut self) -> bool {
+        if self.last_scan.is_some_and(|t| t.elapsed() < SCAN_COOLDOWN) {
+            return false;
+        }
+        self.last_scan = Some(Instant::now());
+        true
+    }
+}
+
+/// Token bucket limiting how fast one connection may send requests.
+struct Budget {
+    tokens: f32,
+    last: Instant,
+}
+
+impl Budget {
+    fn new() -> Self {
+        Self { tokens: REQUEST_BURST, last: Instant::now() }
+    }
+
+    /// Wait (throttle) until a request may proceed.
+    fn take(&mut self) {
+        let now = Instant::now();
+        self.tokens = (self.tokens + now.duration_since(self.last).as_secs_f32() * REQUESTS_PER_SEC).min(REQUEST_BURST);
+        self.last = now;
+        if self.tokens < 1.0 {
+            thread::sleep(Duration::from_secs_f32((1.0 - self.tokens) / REQUESTS_PER_SEC));
+            self.tokens = 1.0;
+            self.last = Instant::now();
+        }
+        self.tokens -= 1.0;
+    }
 }
 
 fn lock(m: &Mutex<State>) -> MutexGuard<'_, State> {
@@ -45,8 +92,10 @@ pub fn run() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // Any local program may connect: the API can only change colours (see proto.rs).
-    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o666)) {
+    // Only root and members of the service's group (`rgbforge`, set with Group= in the systemd
+    // unit; the installer adds the desktop user to it) may connect. Other accounts on the PC
+    // can't reach the service at all.
+    if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o660)) {
         eprintln!("rgbforge-helper: can't set socket permissions: {e}");
         return ExitCode::FAILURE;
     }
@@ -73,12 +122,20 @@ pub fn run() -> ExitCode {
 }
 
 fn serve(stream: UnixStream, state: &Mutex<State>) -> io::Result<()> {
+    stream.set_read_timeout(Some(IDLE_TIMEOUT))?;
+    stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
     let mut writer = stream.try_clone()?;
     let mut reader = BufReader::new(stream);
+    let mut budget = Budget::new();
     loop {
         let response = match proto::read_msg::<Request, _>(&mut reader) {
-            Ok(req) => handle(req, state),
+            Ok(req) => {
+                budget.take();
+                handle(req, state)
+            }
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
+            // Idle for too long: close quietly.
+            Err(e) if matches!(e.kind(), io::ErrorKind::WouldBlock | io::ErrorKind::TimedOut) => return Ok(()),
             Err(e) => {
                 // Malformed input: report once, then drop the connection.
                 let _ = proto::write_msg(&mut writer, &Response::Error(format!("bad request: {e}")));
@@ -94,6 +151,9 @@ fn handle(req: Request, state: &Mutex<State>) -> Response {
         Request::Hello { .. } => Response::Hello { version: proto::VERSION },
         Request::Detect { gpu, ram } => {
             let mut s = lock(state);
+            if !s.scan_allowed() {
+                return Response::Error("Too many device scans; wait a moment and try again.".into());
+            }
             s.drivers.clear(); // drop old drivers first (they hand devices back)
             s.last_write.clear();
             let found = drivers::detect(DemoMode::Never, gpu, ram);
@@ -117,7 +177,7 @@ fn handle(req: Request, state: &Mutex<State>) -> Response {
         }
         Request::Apply { id, frame } => {
             let mut guard = lock(state);
-            let State { drivers, last_write } = &mut *guard;
+            let State { drivers, last_write, .. } = &mut *guard;
             let Some(d) = drivers.iter_mut().find(|d| d.info().id == id) else {
                 return Response::Error("unknown device".into());
             };
@@ -134,11 +194,39 @@ fn handle(req: Request, state: &Mutex<State>) -> Response {
                 Err(e) => Response::Error(e.to_string()),
             }
         }
-        Request::Check(Check::Gpu) => Response::Text(drivers::sapphire::check_report()),
-        Request::Check(Check::Ram) => {
-            // Don't probe the bus while drivers are mid-write.
-            let _s = lock(state);
-            Response::Text(drivers::ene_ram::check_report())
+        Request::Check(what) => {
+            // Don't probe the bus while drivers are mid-write, and not too often.
+            let mut s = lock(state);
+            if !s.scan_allowed() {
+                return Response::Error("Too many checks; wait a moment and try again.".into());
+            }
+            Response::Text(match what {
+                Check::Gpu => drivers::sapphire::check_report(),
+                Check::Ram => drivers::ene_ram::check_report(),
+            })
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn scans_are_rate_limited() {
+        let mut s = State::default();
+        assert!(s.scan_allowed());
+        assert!(!s.scan_allowed(), "a second scan right away must be refused");
+    }
+
+    #[test]
+    fn request_budget_throttles_floods() {
+        let mut b = Budget::new();
+        let start = Instant::now();
+        for _ in 0..(REQUEST_BURST as usize + 24) {
+            b.take();
+        }
+        // The burst is free; the 24 extra requests must wait about 24/240 s = 100 ms.
+        assert!(start.elapsed() >= Duration::from_millis(80), "{:?}", start.elapsed());
     }
 }

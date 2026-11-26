@@ -19,21 +19,43 @@ pub struct Conn {
 
 pub type Shared = Arc<Mutex<Conn>>;
 
-pub fn connect() -> io::Result<Shared> {
+/// Open and greet a new connection to the hardware service.
+fn open_conn() -> io::Result<Conn> {
     let stream = UnixStream::connect(proto::SOCKET)?;
     stream.set_read_timeout(Some(TIMEOUT))?;
     stream.set_write_timeout(Some(TIMEOUT))?;
-    let conn: Shared = Arc::new(Mutex::new(Conn { writer: stream.try_clone()?, reader: BufReader::new(stream) }));
-    match request(&conn, &Request::Hello { version: proto::VERSION })? {
-        Response::Hello { version } if version == proto::VERSION => Ok(conn),
+    let mut c = Conn { writer: stream.try_clone()?, reader: BufReader::new(stream) };
+    proto::write_msg(&mut c.writer, &Request::Hello { version: proto::VERSION })?;
+    match proto::read_msg(&mut c.reader)? {
+        Response::Hello { version } if version == proto::VERSION => Ok(c),
         _ => Err(io::Error::other("the RGB Forge hardware service is a different version; re-run ./install.sh")),
     }
 }
 
+pub fn connect() -> io::Result<Shared> {
+    Ok(Arc::new(Mutex::new(open_conn()?)))
+}
+
+/// The connection itself broke (e.g. the service closed an idle connection or restarted).
+fn is_disconnect(e: &io::Error) -> bool {
+    matches!(
+        e.kind(),
+        io::ErrorKind::BrokenPipe | io::ErrorKind::UnexpectedEof | io::ErrorKind::ConnectionReset | io::ErrorKind::NotConnected
+    )
+}
+
 pub fn request(conn: &Shared, req: &Request) -> io::Result<Response> {
     let mut c = conn.lock().unwrap_or_else(|p| p.into_inner());
-    proto::write_msg(&mut c.writer, req)?;
-    proto::read_msg(&mut c.reader)
+    let first = proto::write_msg(&mut c.writer, req).and_then(|()| proto::read_msg(&mut c.reader));
+    match first {
+        // Reconnect once and retry: the service's device list is shared, so ids stay valid.
+        Err(e) if is_disconnect(&e) => {
+            *c = open_conn()?;
+            proto::write_msg(&mut c.writer, req)?;
+            proto::read_msg(&mut c.reader)
+        }
+        other => other,
+    }
 }
 
 /// Run a read-only check inside the helper (which has the hardware access).
@@ -82,6 +104,7 @@ impl Driver for RemoteDriver {
 }
 
 pub const NOT_RUNNING: &str = "RGB Forge's hardware service isn't running, so real devices can't be controlled. Re-run ./install.sh, or run: sudo systemctl enable --now rgbforge-helper";
+pub const NOT_IN_GROUP: &str = "You're not allowed to use RGB Forge's hardware service yet. Log out and back in (or restart) once after installing, so your account joins the 'rgbforge' group.";
 
 /// Find devices through the helper; demo devices are added here in the app.
 pub fn detect(demo: DemoMode, gpu: bool, ram: bool) -> Detection {
@@ -101,6 +124,7 @@ pub fn detect(demo: DemoMode, gpu: bool, ram: bool) -> Detection {
                 .collect(),
             problems,
         ),
+        Err(e) if e.kind() == io::ErrorKind::PermissionDenied => (Vec::new(), vec![NOT_IN_GROUP.to_string()]),
         Err(_) => (Vec::new(), vec![NOT_RUNNING.to_string()]),
     };
     let show_demo = match demo {

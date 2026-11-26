@@ -57,6 +57,11 @@ sudo modprobe i2c-dev
 sudo udevadm control --reload-rules
 sudo udevadm trigger
 
+echo "==> Allowing your account (and only yours) to use the hardware service"
+# Only root and members of this group can connect to rgbforge-helper's socket.
+sudo groupadd -f --system rgbforge
+sudo usermod -aG rgbforge "$USER"
+
 echo "==> Installing and starting the hardware service (rgbforge-helper)"
 sudo install -o root -g root -m 644 packaging/rgbforge-helper.service /etc/systemd/system/rgbforge-helper.service
 sudo systemctl daemon-reload
@@ -70,4 +75,4 @@ else
     echo "Installed, but the hardware service didn't start. See: systemctl status rgbforge-helper"
 fi
 echo "Open \"RGB Forge\" from your app menu, or run: rgbforge"
-echo "If you used an older version, restart your PC once so the old device permissions are fully removed."
+echo "Restart your PC (or log out and back in) once, so your account's new 'rgbforge' group membership takes effect."
