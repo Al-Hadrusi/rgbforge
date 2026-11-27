@@ -50,7 +50,11 @@ pub fn harden() -> Report {
     // it needs no-new-privileges (or CAP_SYS_ADMIN), which the crate sets for us.
     let landlock = confine_files(&READ_ONLY, DEVICES);
     let no_new_privs = set_no_new_privs(true).is_ok();
-    Report { capabilities_dropped: drop_capabilities(), no_new_privs, landlock }
+    let (none_held, bounding_empty) = drop_capabilities();
+    // With no-new-privileges, nothing (setuid or file-capability programs) can grant
+    // capabilities again, so an unprivileged caller that can't empty its bounding set is
+    // still left with none. The service itself runs as root and empties it too.
+    Report { capabilities_dropped: none_held && (bounding_empty || no_new_privs), no_new_privs, landlock }
 }
 
 fn confine_files(read_only: &[&str], devices: &str) -> &'static str {
@@ -73,8 +77,9 @@ fn confine_files(read_only: &[&str], devices: &str) -> &'static str {
     }
 }
 
-/// Drop every capability for good. Returns true only if none are left anywhere.
-fn drop_capabilities() -> bool {
+/// Drop every capability for good. Returns (none held, bounding set empty). Emptying the
+/// bounding set needs CAP_SETPCAP, which root has.
+fn drop_capabilities() -> (bool, bool) {
     // While we still hold CAP_SETPCAP: stop root from regaining capabilities (on exec or
     // by switching user ids), and lock that setting.
     let _ = set_capabilities_secure_bits(
@@ -93,7 +98,7 @@ fn drop_capabilities() -> bool {
     let none = CapabilitySet::empty();
     let cleared = set_capabilities(None, CapabilitySets { effective: none, permitted: none, inheritable: none }).is_ok();
     let bounding_empty = (0..64u32).all(|bit| !capability_is_in_bounding_set(CapabilitySet::from_bits_retain(1u64 << bit)).unwrap_or(false));
-    cleared && bounding_empty
+    (cleared, bounding_empty)
 }
 
 #[cfg(test)]
@@ -110,10 +115,18 @@ mod tests {
 
     #[test]
     fn no_capabilities_or_new_privileges_remain() {
-        let (report, caps) = in_hardened_thread(|r| (r, rustix::thread::capabilities(None).unwrap()));
+        let had_setpcap = rustix::thread::capabilities(None).unwrap().effective.contains(CapabilitySet::SETPCAP);
+        let (report, caps, bounding) = in_hardened_thread(|r| {
+            let b = (0..64u32).filter(|bit| capability_is_in_bounding_set(CapabilitySet::from_bits_retain(1u64 << bit)).unwrap_or(false)).count();
+            (r, rustix::thread::capabilities(None).unwrap(), b)
+        });
         assert!(report.no_new_privs, "{}", report.line());
         assert!(report.capabilities_dropped, "{}", report.line());
         assert!(caps.effective.is_empty() && caps.permitted.is_empty() && caps.inheritable.is_empty());
+        if had_setpcap {
+            // As root (like the real service): the bounding set is emptied too.
+            assert_eq!(bounding, 0, "bounding set must be empty");
+        }
     }
 
     #[test]
