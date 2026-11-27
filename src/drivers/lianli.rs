@@ -30,9 +30,20 @@ pub(crate) fn allowed(pkt: &[u8]) -> bool {
     match pkt {
         [0xE0, 0x10, 0x60, n, ..] => (n >> 4) < CHANNELS && (1..=6).contains(&(n & 0x0F)),
         [0xE0, 0x10..=0x13, 0x01, 0x02, 0x00, 0x00, ..] => true,
-        [0xE0, 0x30..=0x33, ..] => true,
+        [0xE0, 0x30..=0x33, data @ ..] => colour_data_ok(data),
         _ => false,
     }
+}
+
+/// Colour data: at most 96 LEDs (6 fans x 16), each within the hub's power budget, and
+/// nothing but zero padding after them. This is the protocol's only hardware-protection
+/// limit, so the guard enforces it, not just the packet builder.
+fn colour_data_ok(data: &[u8]) -> bool {
+    let max = usize::from(LEDS_PER_FAN * MAX_FANS) * 3;
+    let (leds, rest) = data.split_at(data.len().min(max));
+    data.len() + 2 <= REPORT
+        && leds.chunks(3).all(|t| t.iter().map(|v| u32::from(*v)).sum::<u32>() <= MAX_SUM)
+        && rest.iter().all(|b| *b == 0)
 }
 
 fn limit(c: Rgb) -> Rgb {
@@ -139,6 +150,24 @@ impl Driver for LianLi {
 #[allow(clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guard_enforces_the_led_power_budget() {
+        let mut p = vec![0u8; REPORT];
+        p[0] = 0xE0;
+        p[1] = 0x31;
+        p[2..5].copy_from_slice(&[200, 200, 60]); // sum 460: at the limit
+        assert!(allowed(&p));
+        p[4] = 61; // sum 461: over budget
+        assert!(!allowed(&p));
+        p[4] = 60;
+        p[2 + 96 * 3] = 1; // a 97th LED
+        assert!(!allowed(&p));
+        assert!(!allowed(&vec![0xE0; REPORT + 1]), "oversized report");
+        // Full-white frames from the builder are scaled down and pass.
+        let white = vec![Rgb::new(255, 255, 255); 96];
+        assert!(frame_packets(3, &white).iter().all(|p| allowed(p)));
+    }
 
     #[test]
     fn fan_and_sync_commands_are_blocked() {
