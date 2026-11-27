@@ -43,7 +43,23 @@ const REG_DIRECT_V2: u16 = 0x8100;
 const REG_DIRECT_MODE: u16 = 0x8020;
 const REG_APPLY: u16 = 0x80A0;
 const APPLY_VAL: u8 = 0x01;
-const MAX_LEDS: u8 = 20;
+/// Size of each layout's colour block (OpenRGB ENESMBusController.h): 0x8000 holds 5 LEDs
+/// (15 bytes; effect colours start at 0x8010 and the mode registers at 0x8020), 0x8100
+/// holds 10 (30 bytes). A chip reporting more is refused: its extra "LEDs" would land on
+/// mode or undocumented registers.
+fn max_leds(direct_base: u16) -> u8 {
+    match direct_base {
+        REG_DIRECT_V1 => 5,
+        REG_DIRECT_V2 => 10,
+        _ => 0,
+    }
+}
+
+/// The colour registers a chip may be written at: never more than its layout's block.
+fn colour_range(direct_base: u16, leds: u8) -> std::ops::Range<u16> {
+    let n = leds.min(max_leds(direct_base));
+    direct_base..direct_base.saturating_add(u16::from(n) * 3)
+}
 
 /// Name strings OpenRGB drives, and their colour-register version.
 const KNOWN: &[(&str, u16)] = &[("DIMM_LED-0102", REG_DIRECT_V1), ("DIMM_LED-0103", REG_DIRECT_V1), ("AUDA0-E6K5-0101", REG_DIRECT_V2)];
@@ -205,8 +221,7 @@ impl Ene {
     }
 
     fn allowed(&self, reg: u16, val: u8) -> bool {
-        let colours = self.direct_base..self.direct_base.saturating_add(u16::from(self.leds) * 3);
-        (reg == REG_DIRECT_MODE && val <= 1) || (reg == REG_APPLY && val == APPLY_VAL) || colours.contains(&reg)
+        write_ok(reg, val, self.direct_base, self.leds)
     }
 
     /// The ONLY write path. Anything outside the allow-list is refused.
@@ -220,8 +235,14 @@ impl Ene {
 }
 
 /// Registers the ENE pointer may be set to (see `Ene::pointer_allowed`).
+/// The complete write allow-list: direct mode on/off, apply (never save) and the stick's
+/// own colour block.
+pub(crate) fn write_ok(reg: u16, val: u8, direct_base: u16, leds: u8) -> bool {
+    (reg == REG_DIRECT_MODE && val <= 1) || (reg == REG_APPLY && val == APPLY_VAL) || colour_range(direct_base, leds).contains(&reg)
+}
+
 pub(crate) fn pointer_ok(reg: u16, direct_base: u16, leds: u8) -> bool {
-    let colours = direct_base..direct_base.saturating_add(u16::from(leds) * 3);
+    let colours = colour_range(direct_base, leds);
     (REG_NAME..REG_NAME + 16).contains(&reg)
         || reg == REG_CONFIG_LED_COUNT
         || reg == REG_DIRECT_MODE
@@ -287,7 +308,7 @@ impl EneRam {
             return Err(refuse(format!("unknown RGB chip \"{name}\"; not touching it")));
         };
         let leds = chip.read(REG_CONFIG_LED_COUNT)?;
-        if leds == 0 || leds > MAX_LEDS {
+        if leds == 0 || leds > max_leds(*base) {
             return Err(refuse(format!("implausible LED count {leds}; not touching it")));
         }
         let original_direct = chip.read(REG_DIRECT_MODE)?;
@@ -397,12 +418,32 @@ mod tests {
         assert!(pointer_ok(REG_NAME + 5, 0, 0) && pointer_ok(REG_CONFIG_LED_COUNT, 0, 0));
         assert!(!pointer_ok(REG_DIRECT_V1, 0, 0));
         // After identification: the stick's own colour registers too, nothing beyond them.
-        assert!(pointer_ok(REG_DIRECT_V1 + 29, REG_DIRECT_V1, 10));
-        assert!(!pointer_ok(REG_DIRECT_V1 + 30, REG_DIRECT_V1, 10));
+        assert!(pointer_ok(REG_DIRECT_V2 + 29, REG_DIRECT_V2, 10));
+        assert!(!pointer_ok(REG_DIRECT_V2 + 30, REG_DIRECT_V2, 10));
         // Slot index / I2C address registers (address remapping) can never be selected.
         for reg in [0x80F8, 0x80F9, 0x1030, 0x0000, 0xFFFF] {
             assert!(!pointer_ok(reg, REG_DIRECT_V1, 20), "{reg:#06x}");
         }
+    }
+
+    #[test]
+    fn colour_writes_never_reach_effect_or_mode_registers() {
+        // However many LEDs a chip claims, colour writes stay inside its layout's block.
+        for leds in 0..=u8::MAX {
+            for reg in 0x8010..=0x80FFu16 {
+                // Only the two documented single-purpose registers, with their safe values.
+                let ok = (0..=u8::MAX).any(|v| write_ok(reg, v, REG_DIRECT_V1, leds));
+                assert_eq!(ok, reg == REG_DIRECT_MODE || reg == REG_APPLY, "v1 leds={leds} reg={reg:#06x}");
+            }
+            for reg in 0x811E..=0x81FFu16 {
+                assert!(!write_ok(reg, 0, REG_DIRECT_V2, leds), "v2 leds={leds} reg={reg:#06x}");
+            }
+        }
+        assert!(!write_ok(REG_DIRECT_MODE, 2, REG_DIRECT_V1, 5), "direct mode only takes 0 or 1");
+        assert!(!write_ok(REG_APPLY, 0xAA, REG_DIRECT_V1, 5), "save is never allowed");
+        assert!(write_ok(REG_DIRECT_V1 + 14, 0xFF, REG_DIRECT_V1, 5));
+        assert_eq!(max_leds(REG_DIRECT_V1), 5);
+        assert_eq!(max_leds(REG_DIRECT_V2), 10);
     }
 
     #[test]
