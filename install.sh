@@ -7,8 +7,10 @@
 # against each device's safety allow-list.
 #
 # Run as your normal user (not with sudo); it asks for your password for the system steps.
-set -euo pipefail
+set -Eeuo pipefail
 cd "$(dirname "$0")"
+# If any step fails, say which one instead of stopping silently halfway.
+trap 'echo; echo "STOPPED: the step on line $LINENO of install.sh failed (see the message above). Nothing after it was done; fix the problem and run ./install.sh again." >&2' ERR
 
 if [ "$(id -u)" -eq 0 ]; then
     echo "Please run ./install.sh as your normal user, not with sudo (it asks for your password when needed)."
@@ -87,6 +89,8 @@ fi
 echo "==> Removing old device permissions and installing the safety rule"
 # This replaces the old rules that gave every program direct device access. The new file
 # grants no access at all; it only records the RAM safety-lock state at boot (see README).
+# Some systems (e.g. Gentoo with OpenRC) don't create these folders by default.
+as_root mkdir -p /etc/udev/rules.d /etc/modules-load.d
 "$SRC" --print-udev-rules | as_root tee /etc/udev/rules.d/60-rgbforge.rules >/dev/null
 # i2c-dev exposes I2C buses as device files, which only the hardware service may open.
 echo i2c-dev | as_root tee /etc/modules-load.d/rgbforge-i2c.conf >/dev/null
