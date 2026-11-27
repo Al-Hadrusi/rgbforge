@@ -209,10 +209,11 @@ fn handle(req: Request, state: &Mutex<State>, peer: Peer, refused_logged: &mut H
                 return Response::Error("Too many device scans; wait a moment and try again.".into());
             }
             // Enabling RAM or graphics-card control is the highest-risk action: record who did it.
-            audit(peer, "detect", &format!("gpu={gpu} ram={ram}"));
+            let allow = crate::policy::load();
+            audit(peer, "detect", &format!("gpu={gpu} ram={ram} admin-allows={}", allow.text().replace(' ', ",")));
             s.drivers.clear(); // drop old drivers first (they hand devices back)
             s.last_write.clear();
-            let found = drivers::detect(DemoMode::Never, gpu, ram);
+            let found = drivers::detect_with(DemoMode::Never, gpu, ram, allow);
             let devices = found
                 .drivers
                 .iter()

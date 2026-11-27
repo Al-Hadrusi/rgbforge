@@ -726,6 +726,7 @@ impl App<'_> {
                             ui.label(RichText::new(format!("•  {line}")).color(WARN));
                         }
                         ui.label(RichText::new("What it does: talks only to this exact card model, only on its dedicated RGB bus, only to the lighting chip, and only sends colour commands. Tip: first run `rgbforge --gpu-check` in a terminal; it checks everything without touching the card.").color(DIM));
+                        ui.label(RichText::new("An administrator must allow it once (the installer asks): sudo rgbforge --allow-hardware gpu. Add ,ram to keep RAM allowed too.").color(DIM));
                         ui.horizontal(|ui| {
                             let mut on = self.core.settings.gpu_enabled;
                             if toggle(ui, &mut on).changed() {
@@ -741,6 +742,7 @@ impl App<'_> {
                         for line in [
                             "Your chipset's \"SPD Write Disable\" lock must be on. It's a hardware lock that blocks every write to the chips your PC reads to run its memory.",
                             "OpenRGB must not be running.",
+                            "An administrator must allow it once (the installer asks): sudo rgbforge --allow-hardware ram. Other programs running as you can't switch this on.",
                             "It only talks to the RAM's RGB chips (0x70-0x77), only after they identify themselves, and it can't send the save or address-change commands.",
                         ] {
                             ui.label(RichText::new(format!("•  {line}")).color(DIM));

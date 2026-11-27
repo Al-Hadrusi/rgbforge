@@ -147,6 +147,10 @@ on some coolers, pump control). Now:
   `rgbforge` group (the installer adds your account) may connect, and even they can only change
   colours. The service also asks the kernel who is connecting and refuses anyone else even if the
   socket's permissions were ever mis-set.
+- **Administrator switch for RAM and graphics cards.** Their drivers only start if the root-owned
+  file `/etc/rgbforge/hardware-allow` allows them (`sudo rgbforge --allow-hardware ram,gpu`, or
+  `none`; the installer asks once). A program running as your account can change colours, but
+  can't turn RAM or GPU writes on. A file anyone but root could change counts as "allow nothing".
 - **Audit trail.** Security-relevant actions (connections refused, device scans with the RAM/GPU
   opt-ins, LED-count changes, read-only checks, writes a safety list blocked) are logged with the
   caller's user and process ID: `journalctl -u rgbforge-helper | grep audit`. Colours and message

@@ -77,21 +77,9 @@ pub fn spd_write_disabled() -> Option<bool> {
     // There is deliberately no fallback: kernel log text can be influenced (e.g. by USB
     // device names), so only the register value itself counts as evidence.
     let captured = bus_pci_name()
-        .and_then(|pci| root_owned_read(&Path::new(HOSTC_DIR).join(format!("smbus-hostc-{pci}"))))
+        .and_then(|pci| super::root_owned_read(&Path::new(HOSTC_DIR).join(format!("smbus-hostc-{pci}"))))
         .and_then(|t| parse_hostc(&t))?;
     Some(captured & HOSTC_SPD_WD != 0)
-}
-
-/// Read a small file only if it and its folder are root-owned, not links, and writable by
-/// nobody else, so no other account can plant or alter the safety evidence.
-fn root_owned_read(path: &Path) -> Option<String> {
-    use std::os::unix::fs::MetadataExt;
-    let trusted = |m: &fs::Metadata| m.uid() == 0 && m.mode() & 0o022 == 0;
-    let dir = fs::symlink_metadata(path.parent()?).ok()?;
-    let file = fs::symlink_metadata(path).ok()?;
-    (dir.is_dir() && trusted(&dir) && file.file_type().is_file() && trusted(&file) && file.len() <= 64)
-        .then(|| fs::read_to_string(path).ok())
-        .flatten()
 }
 
 /// PCI name (e.g. "0000:00:1f.4") of the chipset SMBus controller.
@@ -371,6 +359,7 @@ impl Driver for EneRam {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::drivers::root_owned_read;
 
     #[test]
     fn address_range_excludes_spd_and_pmic() {

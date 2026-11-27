@@ -37,6 +37,21 @@ sudo install -o root -g root -m 755 "$SRC" "$BIN"
 # Older versions lived in a folder your user can write to; remove that copy.
 rm -f "$HOME/.local/bin/rgbforge"
 
+if [ ! -f /etc/rgbforge/hardware-allow ]; then
+    echo "==> RAM and graphics card lighting (off unless you allow them)"
+    echo "    These write to your RAM sticks' and graphics card's lighting chips. RGB Forge only"
+    echo "    sends lighting commands, but only allow them if you want to control that lighting."
+    allow=""
+    if [ -t 0 ] || [ -r /dev/tty ]; then
+        read -r -p "    Allow RAM lighting control? [y/N] " a </dev/tty || a=n
+        case "$a" in [yY]*) allow="ram" ;; esac
+        read -r -p "    Allow graphics card lighting control? [y/N] " a </dev/tty || a=n
+        case "$a" in [yY]*) allow="${allow:+$allow,}gpu" ;; esac
+    fi
+    sudo "$BIN" --allow-hardware "${allow:-none}"
+    echo "    (Change later with: sudo rgbforge --allow-hardware ram,gpu   or   none)"
+fi
+
 echo "==> Adding RGB Forge to your app menu"
 mkdir -p "$HOME/.local/share/applications"
 sed "s|^Exec=.*|Exec=$BIN|" packaging/rgbforge.desktop > "$HOME/.local/share/applications/rgbforge.desktop"

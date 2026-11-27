@@ -155,6 +155,18 @@ pub fn trusted_process_names() -> Vec<String> {
         .collect()
 }
 
+/// Read a small file only if it and its folder are root-owned and writable by root alone
+/// (regular file, at most 64 bytes, no symlinks). Anything else counts as absent.
+pub(crate) fn root_owned_read(path: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let trusted = |m: &std::fs::Metadata| m.uid() == 0 && m.mode() & 0o022 == 0;
+    let dir = std::fs::symlink_metadata(path.parent()?).ok()?;
+    let file = std::fs::symlink_metadata(path).ok()?;
+    (dir.is_dir() && trusted(&dir) && file.file_type().is_file() && trusted(&file) && file.len() <= 64)
+        .then(|| std::fs::read_to_string(path).ok())
+        .flatten()
+}
+
 /// root, plus every account in the `rgbforge` group (listed members or primary group).
 pub(crate) fn trusted_uids(group: &str, passwd: &str) -> Vec<u32> {
     let mut uids = vec![0];
@@ -193,8 +205,18 @@ pub struct Detection {
     pub problems: Vec<String>,
 }
 
-pub fn detect(demo: DemoMode, gpu: bool, ram: bool) -> Detection {
+/// The RAM and graphics-card drivers only start when both the app asks for them and the
+/// administrator's switch (see [`crate::policy`]) allows them.
+pub fn detect_with(demo: DemoMode, gpu: bool, ram: bool, allow: crate::policy::Allow) -> Detection {
     let mut d = detect_from(hidraw::enumerate(), demo);
+    let locked: Vec<&str> = [(ram && !allow.ram, "ram"), (gpu && !allow.gpu, "gpu")]
+        .into_iter()
+        .filter_map(|(l, w)| l.then_some(w))
+        .collect();
+    if !locked.is_empty() {
+        d.problems.push(locked_message(&locked));
+    }
+    let (gpu, ram) = (gpu && allow.gpu, ram && allow.ram);
     if gpu {
         match sapphire::find_card(std::path::Path::new("/sys/bus/pci/devices")) {
             None => d.problems.push(format!("Graphics card lighting is on, but no {} was found.", sapphire::NAME)),
@@ -229,6 +251,18 @@ fn is_razer(h: &HidInfo) -> bool {
 }
 
 const RAZER_VID: u16 = 0x1532;
+
+pub fn locked_message(locked: &[&str]) -> String {
+    let what = match locked {
+        [w] if *w == "ram" => "RAM lighting is",
+        [_] => "Graphics card lighting is",
+        _ => "RAM and graphics card lighting are",
+    };
+    format!(
+        "{what} locked for safety. To allow it, run once in a terminal: sudo rgbforge --allow-hardware {}",
+        locked.join(",")
+    )
+}
 
 pub fn detect_from(hids: Vec<HidInfo>, demo: DemoMode) -> Detection {
     let mut drivers: Vec<Box<dyn Driver>> = Vec::new();
@@ -315,6 +349,15 @@ pub(crate) fn chunks(colors: &[Rgb], max: usize) -> impl Iterator<Item = (usize,
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn ram_and_gpu_stay_off_unless_the_administrator_allows_them() {
+        // The app asks for both; the administrator's switch allows neither.
+        let d = detect_with(DemoMode::Never, true, true, crate::policy::Allow::default());
+        assert!(d.drivers.iter().all(|x| !matches!(x.info().kind, crate::model::Kind::Ram | crate::model::Kind::Gpu)));
+        assert!(d.problems.iter().any(|p| p.contains("sudo rgbforge --allow-hardware ram,gpu")), "{:?}", d.problems);
+        assert_eq!(locked_message(&["gpu"]), "Graphics card lighting is locked for safety. To allow it, run once in a terminal: sudo rgbforge --allow-hardware gpu");
+    }
 
     #[test]
     fn unknown_devices_are_ignored() {

@@ -11,6 +11,7 @@ mod engine;
 mod helper;
 mod hidraw;
 mod model;
+mod policy;
 mod proto;
 mod remote;
 mod sensors;
@@ -84,12 +85,36 @@ fn main() -> ExitCode {
             print!("{}", run_check(proto::Check::Gpu));
             return ExitCode::SUCCESS;
         }
+        Some("--allow-hardware") => {
+            let Some(allow) = args.get(1).and_then(|a| policy::parse_arg(a)) else {
+                eprintln!("usage: sudo rgbforge --allow-hardware ram,gpu   (or ram, gpu, none)");
+                return ExitCode::FAILURE;
+            };
+            return match policy::save(allow) {
+                Ok(()) => {
+                    println!("Saved: {} allowed ({}). Open RGB Forge and press Rescan to apply.", allow.text(), policy::FILE);
+                    ExitCode::SUCCESS
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::PermissionDenied => {
+                    eprintln!("Only an administrator can change this. Run: sudo rgbforge --allow-hardware {}", args.get(1).map_or("", String::as_str));
+                    ExitCode::FAILURE
+                }
+                Err(e) => {
+                    eprintln!("Couldn't save {}: {e}", policy::FILE);
+                    ExitCode::FAILURE
+                }
+            };
+        }
+        Some("--hardware-status") => {
+            println!("RAM and graphics card lighting allowed by the administrator: {}", policy::load().text());
+            return ExitCode::SUCCESS;
+        }
         Some("--print-udev-rules") => {
             print!("{}", udev_rules());
             return ExitCode::SUCCESS;
         }
         Some("--help" | "-h") => {
-            println!("RGB Forge: control your PC's RGB lighting.\n\nUsage:\n  rgbforge                     open the app\n  rgbforge --minimized         open the app minimized (used when starting with your computer)\n  rgbforge --list-devices      list USB devices without a driver (for driver requests)\n  rgbforge --music-check       show live sound levels (checks the Music effect can hear your PC)\n  rgbforge --ram-check         read-only check of RAM lighting support\n  rgbforge --gpu-check         read-only check of graphics-card lighting support\n  rgbforge --print-udev-rules  print the permission rules (see Help in the app)");
+            println!("RGB Forge: control your PC's RGB lighting.\n\nUsage:\n  rgbforge                     open the app\n  rgbforge --minimized         open the app minimized (used when starting with your computer)\n  rgbforge --list-devices      list USB devices without a driver (for driver requests)\n  rgbforge --music-check       show live sound levels (checks the Music effect can hear your PC)\n  rgbforge --ram-check         read-only check of RAM lighting support\n  rgbforge --gpu-check         read-only check of graphics-card lighting support\n  rgbforge --print-udev-rules  print the permission rules (see Help in the app)\n  sudo rgbforge --allow-hardware ram,gpu   allow RAM / graphics card lighting (or: none)\n  rgbforge --hardware-status   show what the administrator allowed");
             return ExitCode::SUCCESS;
         }
         Some(other) => {
