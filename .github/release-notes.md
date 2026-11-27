@@ -1,24 +1,36 @@
 ## Install (no compiling needed)
 
-1. Download **`rgbforge-…-x86_64-linux.tar.gz`** below.
-2. Unpack it, then run the installer **as your normal user** (not with `sudo`; it asks for your password itself):
+**Recommended: the verifying installer.** It downloads this release and refuses to unpack anything
+unless the file matches GitHub's own checksum and its signature proves it was built by this
+repository's release workflow:
 
 ```bash
+curl -fsSLO https://raw.githubusercontent.com/Al-Hadrusi/rgbforge/main/get.sh
+less get.sh      # read it first
+bash get.sh
+```
+
+The signature check needs the GitHub CLI, logged in (`gh auth login`), or `cosign`.
+
+**Manual:** download **`rgbforge-…-x86_64-linux.tar.gz`** below and verify it before unpacking:
+
+```bash
+gh attestation verify rgbforge-*-x86_64-linux.tar.gz --repo Al-Hadrusi/rgbforge --signer-workflow Al-Hadrusi/rgbforge/.github/workflows/release.yml
 tar -xzf rgbforge-*-x86_64-linux.tar.gz
 cd rgbforge-*-x86_64-linux
-./install.sh
+./install.sh     # as your normal user, not with sudo
 ```
 
-3. Restart your PC once, then open **RGB Forge** from your app menu.
+Without the GitHub CLI, `cosign` can check the `.sigstore.json` file attached below:
 
-Optional: check the download.
 ```bash
-sha256sum -c rgbforge-*-x86_64-linux.tar.gz.sha256
+cosign verify-blob-attestation --new-bundle-format --bundle rgbforge-*-x86_64-linux.tar.gz.sigstore.json \
+  --type https://slsa.dev/provenance/v1 --certificate-oidc-issuer https://token.actions.githubusercontent.com \
+  --certificate-identity-regexp '^https://github.com/Al-Hadrusi/rgbforge/\.github/workflows/release\.yml@refs/tags/v' \
+  rgbforge-*-x86_64-linux.tar.gz
 ```
-To verify it was built by this repository's GitHub workflow (needs the GitHub CLI):
-```bash
-gh attestation verify rgbforge-*-x86_64-linux.tar.gz --repo Al-Hadrusi/rgbforge
-```
+
+Then restart your PC once and open **RGB Forge** from your app menu.
 
 Works on 64-bit (x86_64) Linux distributions from about 2022 onwards (glibc 2.35+) with systemd, including Arch, Fedora, Ubuntu 22.04+ and Debian 12+.
 

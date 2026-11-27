@@ -15,10 +15,24 @@ No OpenRGB, no background services, no root.
 
 ## Install
 
-**Easiest:** download the ready-made `rgbforge-…-x86_64-linux.tar.gz` from
-[Releases](https://github.com/Al-Hadrusi/rgbforge/releases/latest), then:
+**Easiest (verified):** download the release installer, read it, then run it. It downloads the
+latest release and refuses to unpack anything unless the file matches GitHub's own checksum *and*
+its signature proves it was built by this repository's release workflow:
 
 ```bash
+curl -fsSLO https://raw.githubusercontent.com/Al-Hadrusi/rgbforge/main/get.sh
+less get.sh
+bash get.sh
+```
+
+The signature check needs either the GitHub CLI, logged in (`sudo pacman -S github-cli`, then
+`gh auth login`), or `cosign` (`sudo pacman -S cosign`).
+
+**Manual:** download `rgbforge-…-x86_64-linux.tar.gz` from
+[Releases](https://github.com/Al-Hadrusi/rgbforge/releases/latest), verify it, then install:
+
+```bash
+gh attestation verify rgbforge-*-x86_64-linux.tar.gz --repo Al-Hadrusi/rgbforge --signer-workflow Al-Hadrusi/rgbforge/.github/workflows/release.yml
 tar -xzf rgbforge-*-x86_64-linux.tar.gz && cd rgbforge-*-x86_64-linux && ./install.sh
 ```
 

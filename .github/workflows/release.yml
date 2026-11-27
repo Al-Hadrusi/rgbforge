@@ -63,6 +63,7 @@ jobs:
           name: release
           path: dist
       - name: Attest build provenance
+        id: attest
         uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
         with:
           subject-path: dist/rgbforge-*.tar.gz
@@ -72,8 +73,12 @@ jobs:
           GH_REPO: ${{ github.repository }}
           TAG: ${{ github.event.release.tag_name }}
           BODY: ${{ github.event.release.body }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
         run: |
-          gh release upload "$TAG" dist/rgbforge-*.tar.gz dist/rgbforge-*.tar.gz.sha256 --clobber
+          # The signed provenance bundle goes next to the download, so get.sh (and anyone with
+          # cosign) can verify it without a GitHub login.
+          for f in dist/rgbforge-*.tar.gz; do cp "$BUNDLE" "$f.sigstore.json"; done
+          gh release upload "$TAG" dist/rgbforge-*.tar.gz dist/rgbforge-*.tar.gz.sha256 dist/rgbforge-*.tar.gz.sigstore.json --clobber
           # Fill in the standard install notes if the release was published without any.
           if [ -z "$(printf '%s' "$BODY" | tr -d '[:space:]')" ]; then
             gh release edit "$TAG" --notes-file dist/release-notes.md
