@@ -28,6 +28,8 @@ fn open_conn() -> io::Result<Conn> {
     proto::write_msg(&mut c.writer, &Request::Hello { version: proto::VERSION })?;
     match proto::read_msg(&mut c.reader)? {
         Response::Hello { version } if version == proto::VERSION => Ok(c),
+        // The service checked who we are and refused (not in the `rgbforge` group yet).
+        Response::Error(m) if m == NOT_IN_GROUP => Err(io::Error::new(io::ErrorKind::PermissionDenied, m)),
         _ => Err(io::Error::other("the RGB Forge hardware service is a different version; re-run ./install.sh")),
     }
 }

@@ -10,7 +10,7 @@
 mod aura;
 mod corsair;
 mod asrock;
-mod demo;
+pub(crate) mod demo;
 mod gigabyte;
 mod lianli;
 mod nzxt;

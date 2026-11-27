@@ -4,7 +4,7 @@
 //! driver and accepts only the narrow requests in [`crate::proto`], so no other program
 //! on the PC gets raw access to the SMBus, the GPU's RGB bus or USB lighting controllers.
 
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::fs;
 use std::io::{self, BufReader};
 use std::os::unix::fs::PermissionsExt;
@@ -79,6 +79,51 @@ fn lock(m: &Mutex<State>) -> MutexGuard<'_, State> {
     m.lock().unwrap_or_else(|p| p.into_inner())
 }
 
+/// Who is on the other end of a connection, as reported by the kernel (SO_PEERCRED).
+/// This can't be forged by the client, unlike anything it sends.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct Peer {
+    uid: u32,
+    pid: i32,
+}
+
+fn peer_of(stream: &UnixStream) -> io::Result<Peer> {
+    let cred = rustix::net::sockopt::socket_peercred(stream)?;
+    Ok(Peer { uid: cred.uid.as_raw(), pid: cred.pid.as_raw_nonzero().get() })
+}
+
+/// Accounts allowed to use the service: root and the `rgbforge` group. The socket's file
+/// mode already enforces this; checking the kernel-reported identity as well means a
+/// mis-set mode, a stale group membership or a future packaging mistake can't widen access.
+fn trusted_now() -> Vec<u32> {
+    let group = fs::read_to_string("/etc/group").unwrap_or_default();
+    let passwd = fs::read_to_string("/etc/passwd").unwrap_or_default();
+    drivers::trusted_uids(&group, &passwd)
+}
+
+fn authorized(peer: Peer, trusted: &[u32]) -> bool {
+    trusted.contains(&peer.uid)
+}
+
+/// Client-supplied text made safe for a log line: no control characters (no forged log
+/// lines), only a conservative character set, and bounded length.
+fn log_safe(text: &str) -> String {
+    text.chars()
+        .filter(|c| c.is_ascii_alphanumeric() || matches!(c, ':' | '.' | '_' | '-' | '/'))
+        .take(80)
+        .collect()
+}
+
+/// One audit line on stderr (the systemd journal: `journalctl -u rgbforge-helper`).
+/// Records who did a security-relevant thing. Never colours, never message bodies.
+fn audit_line(peer: Peer, event: &str, detail: &str) -> String {
+    format!("rgbforge-helper audit: event={event} uid={} pid={} {detail}", peer.uid, peer.pid)
+}
+
+fn audit(peer: Peer, event: &str, detail: &str) {
+    eprintln!("{}", audit_line(peer, event, detail).trim_end());
+}
+
 pub fn run() -> ExitCode {
     let path = Path::new(proto::SOCKET);
     if let Some(dir) = path.parent() {
@@ -108,9 +153,11 @@ pub fn run() -> ExitCode {
             continue; // dropping the connection closes it
         }
         clients.fetch_add(1, Ordering::SeqCst);
+        let Ok(peer) = peer_of(&conn) else { continue };
+        let trusted = trusted_now();
         let (st, cl) = (Arc::clone(&state), Arc::clone(&clients));
         let spawned = thread::Builder::new().name("rgbforge-client".into()).spawn(move || {
-            let _ = serve(conn, &st);
+            let _ = serve(conn, &st, peer, &trusted);
             cl.fetch_sub(1, Ordering::SeqCst);
         });
         if spawned.is_err() {
@@ -121,17 +168,24 @@ pub fn run() -> ExitCode {
     ExitCode::SUCCESS
 }
 
-fn serve(stream: UnixStream, state: &Mutex<State>) -> io::Result<()> {
+fn serve(stream: UnixStream, state: &Mutex<State>, peer: Peer, trusted: &[u32]) -> io::Result<()> {
     stream.set_read_timeout(Some(IDLE_TIMEOUT))?;
     stream.set_write_timeout(Some(WRITE_TIMEOUT))?;
     let mut writer = stream.try_clone()?;
+    if !authorized(peer, trusted) {
+        // Refuse before reading anything: no request from this account is ever handled.
+        audit(peer, "connection-refused", "reason=not-in-rgbforge-group");
+        let _ = proto::write_msg(&mut writer, &Response::Error(crate::remote::NOT_IN_GROUP.into()));
+        return Ok(());
+    }
+    let mut refused_logged = HashSet::new();
     let mut reader = BufReader::new(stream);
     let mut budget = Budget::new();
     loop {
         let response = match proto::read_msg::<Request, _>(&mut reader) {
             Ok(req) => {
                 budget.take();
-                handle(req, state)
+                handle(req, state, peer, &mut refused_logged)
             }
             Err(e) if e.kind() == io::ErrorKind::UnexpectedEof => return Ok(()),
             // Idle for too long: close quietly.
@@ -146,7 +200,7 @@ fn serve(stream: UnixStream, state: &Mutex<State>) -> io::Result<()> {
     }
 }
 
-fn handle(req: Request, state: &Mutex<State>) -> Response {
+fn handle(req: Request, state: &Mutex<State>, peer: Peer, refused_logged: &mut HashSet<String>) -> Response {
     match req {
         Request::Hello { .. } => Response::Hello { version: proto::VERSION },
         Request::Detect { gpu, ram } => {
@@ -154,6 +208,8 @@ fn handle(req: Request, state: &Mutex<State>) -> Response {
             if !s.scan_allowed() {
                 return Response::Error("Too many device scans; wait a moment and try again.".into());
             }
+            // Enabling RAM or graphics-card control is the highest-risk action: record who did it.
+            audit(peer, "detect", &format!("gpu={gpu} ram={ram}"));
             s.drivers.clear(); // drop old drivers first (they hand devices back)
             s.last_write.clear();
             let found = drivers::detect(DemoMode::Never, gpu, ram);
@@ -169,6 +225,7 @@ fn handle(req: Request, state: &Mutex<State>) -> Response {
             let mut s = lock(state);
             match s.drivers.iter_mut().find(|d| d.info().id == id) {
                 Some(d) => {
+                    audit(peer, "resize", &format!("device={} zone={zone} leds={leds}", log_safe(&id)));
                     d.resize_zone(zone, leds);
                     Response::Ok
                 }
@@ -191,7 +248,14 @@ fn handle(req: Request, state: &Mutex<State>) -> Response {
                     last_write.insert(id, Instant::now());
                     Response::Ok
                 }
-                Err(e) => Response::Error(e.to_string()),
+                Err(e) => {
+                    // A write the driver's allow-list blocked: log it once per device per connection
+                    // (frames arrive many times a second; don't flood the journal).
+                    if e.kind() == io::ErrorKind::PermissionDenied && refused_logged.insert(id.clone()) {
+                        audit(peer, "write-blocked", &format!("device={}", log_safe(&id)));
+                    }
+                    Response::Error(e.to_string())
+                }
             }
         }
         Request::Check(what) => {
@@ -200,6 +264,7 @@ fn handle(req: Request, state: &Mutex<State>) -> Response {
             if !s.scan_allowed() {
                 return Response::Error("Too many checks; wait a moment and try again.".into());
             }
+            audit(peer, "check", &format!("what={what:?}"));
             Response::Text(match what {
                 Check::Gpu => drivers::sapphire::check_report(),
                 Check::Ram => drivers::ene_ram::check_report(),
@@ -209,8 +274,72 @@ fn handle(req: Request, state: &Mutex<State>) -> Response {
 }
 
 #[cfg(test)]
+#[allow(clippy::unwrap_used, clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    fn demo_state() -> Arc<Mutex<State>> {
+        Arc::new(Mutex::new(State { drivers: drivers::demo::devices(), ..State::default() }))
+    }
+
+    fn fan_leds(state: &Mutex<State>) -> u16 {
+        let s = lock(state);
+        let d = s.drivers.iter().find(|d| d.info().id == "demo:fans").unwrap();
+        d.info().zones[0].leds
+    }
+
+    /// Run the real `serve` on one end of a socket pair, send `req`, return the reply.
+    fn exchange(state: &Arc<Mutex<State>>, trusted: Vec<u32>, req: &Request) -> Response {
+        let (client, server) = UnixStream::pair().unwrap();
+        let peer = peer_of(&server).unwrap();
+        let st = Arc::clone(state);
+        let t = thread::spawn(move || serve(server, &st, peer, &trusted));
+        let mut w = client.try_clone().unwrap();
+        // A refused peer may have closed already; the reply below is what matters.
+        let _ = proto::write_msg(&mut w, req);
+        let reply = proto::read_msg::<Response, _>(&mut BufReader::new(client)).unwrap();
+        drop(w);
+        let _ = t.join();
+        reply
+    }
+
+    #[test]
+    fn peer_identity_comes_from_the_kernel() {
+        let (a, b) = UnixStream::pair().unwrap();
+        let p = peer_of(&b).unwrap();
+        assert_eq!(p.pid, i32::try_from(std::process::id()).unwrap());
+        assert_eq!(peer_of(&a).unwrap().uid, p.uid);
+    }
+
+    #[test]
+    fn an_account_outside_the_group_is_refused_and_changes_nothing() {
+        let state = demo_state();
+        let before = fan_leds(&state);
+        let me = peer_of(&UnixStream::pair().unwrap().0).unwrap().uid;
+        let not_me = vec![me.wrapping_add(1)];
+        let reply = exchange(&state, not_me, &Request::Resize { id: "demo:fans".into(), zone: 0, leds: 7 });
+        assert!(matches!(reply, Response::Error(ref m) if m == crate::remote::NOT_IN_GROUP), "{reply:?}");
+        assert_eq!(fan_leds(&state), before, "a refused request must leave the device unchanged");
+    }
+
+    #[test]
+    fn a_trusted_account_is_served() {
+        let state = demo_state();
+        let me = peer_of(&UnixStream::pair().unwrap().0).unwrap().uid;
+        let reply = exchange(&state, vec![me], &Request::Resize { id: "demo:fans".into(), zone: 0, leds: 7 });
+        assert_eq!(reply, Response::Ok);
+        assert_eq!(fan_leds(&state), 7);
+    }
+
+    #[test]
+    fn audit_lines_cannot_be_forged_or_leak_data() {
+        let peer = Peer { uid: 1000, pid: 42 };
+        let id = "demo:fans\nrgbforge-helper audit: event=detect uid=0 ram=true";
+        let line = audit_line(peer, "resize", &format!("device={}", log_safe(id)));
+        assert!(!line.contains('\n') && !line.contains(" uid=0"), "{line}");
+        assert!(line.starts_with("rgbforge-helper audit: event=resize uid=1000 pid=42 device=demo:fans"), "{line}");
+        assert_eq!(log_safe(&"x".repeat(500)).len(), 80);
+    }
 
     #[test]
     fn scans_are_rate_limited() {
