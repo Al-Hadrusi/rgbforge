@@ -192,11 +192,23 @@ fn err(e: impl std::error::Error + Send + Sync + 'static) -> io::Error {
 /// to an SMBus "write byte data", but it also works on buses that reject SMBus-style
 /// requests (reported on another RX 9070 XT's RGB bus).
 fn write_reg(dev: &mut LinuxI2CDevice, reg: u8, value: u8) -> io::Result<()> {
+    if !reg_allowed(reg) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "blocked non-lighting graphics card register"));
+    }
     dev.write(&[reg, value]).map_err(err)
+}
+
+/// The complete register allow-list for the lighting chip: sync-cable input, mode and the
+/// three colour registers. Reads (register selects) and writes both go through it.
+pub(crate) fn reg_allowed(reg: u8) -> bool {
+    matches!(reg, REG_EXTERNAL_CONTROL | REG_MODE | REG_RED | REG_GREEN | REG_BLUE)
 }
 
 /// Register read: SMBus "read byte data" first, then the plain-I2C equivalent.
 fn read_reg(dev: &mut LinuxI2CDevice, reg: u8) -> io::Result<u8> {
+    if !reg_allowed(reg) {
+        return Err(io::Error::new(io::ErrorKind::PermissionDenied, "blocked non-lighting graphics card register"));
+    }
     if let Ok(v) = dev.smbus_read_byte_data(reg) {
         return Ok(v);
     }
@@ -287,6 +299,12 @@ impl Driver for SapphireNitro {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn only_the_five_lighting_registers_are_reachable() {
+        let allowed: Vec<u8> = (0..=u8::MAX).filter(|r| reg_allowed(*r)).collect();
+        assert_eq!(allowed, vec![0x0F, 0x10, 0x1A, 0x1B, 0x1C]);
+    }
 
     fn fake_pci(root: &Path, slot: &str, ids: [&str; 4], adapters: &[(u32, &str)]) {
         let d = root.join(slot);
