@@ -32,9 +32,22 @@ pub enum Model {
     Hub { channels: u8 },
 }
 
-/// The only command prefixes this driver may ever send.
+/// The apply packet's fixed bytes after the channel (OpenRGB NZXTHue2Controller::SendApply).
+const APPLY_TAIL: [u8; 13] = [0x00, 0x01, 0x00, 0x00, 0x28, 0x00, 0x00, 0x80, 0x00, 0x32, 0x00, 0x00, 0x01];
+
+/// The complete write allow-list: the accessory query, the two colour packets and the
+/// apply packet, each for exactly one channel. Pump and fan commands (0x60, 0x62, 0x72)
+/// and hardware effect modes are unreachable.
 pub(crate) fn allowed(pkt: &[u8]) -> bool {
-    matches!(pkt, [0x20, 0x03, ..] | [0x22, 0x10, ..] | [0x22, 0x11, ..] | [0x22, 0xA0, ..])
+    let one_channel = |cid: u8| cid.count_ones() == 1;
+    match pkt {
+        [0x20, 0x03, rest @ ..] => rest.iter().all(|b| *b == 0),
+        [0x22, 0x10 | 0x11, cid, 0x00, ..] => one_channel(*cid),
+        [0x22, 0xA0, cid, rest @ ..] => {
+            one_channel(*cid) && rest.starts_with(&APPLY_TAIL) && rest.iter().skip(APPLY_TAIL.len()).all(|b| *b == 0)
+        }
+        _ => false,
+    }
 }
 
 /// LEDs on an NZXT accessory, by the id the device reports (from OpenRGB's table).
@@ -88,7 +101,7 @@ pub(crate) fn frame_packets(cid: u8, colors: &[Rgb]) -> [[u8; REPORT]; 3] {
     [
         packet(&[0x22, 0x10, cid, 0x00], first),
         packet(&[0x22, 0x11, cid, 0x00], second),
-        packet(&[0x22, 0xA0, cid, 0x00, 0x01, 0x00, 0x00, 0x28, 0x00, 0x00, 0x80, 0x00, 0x32, 0x00, 0x00, 0x01], &[]),
+        packet(&[0x22, 0xA0, cid], &APPLY_TAIL),
     ]
 }
 
@@ -209,10 +222,26 @@ mod tests {
     use super::*;
 
     #[test]
-    fn only_lighting_commands_pass() {
-        for ok in [&[0x20, 0x03][..], &[0x22, 0x10, 1], &[0x22, 0x11, 1], &[0x22, 0xA0, 1]] {
-            assert!(allowed(ok));
+    fn only_exact_single_channel_lighting_packets_pass() {
+        let colors = vec![Rgb::new(9, 8, 7); 40];
+        for cid in [1, 2, 4, 8, 0x80] {
+            assert!(frame_packets(cid, &colors).iter().all(|p| allowed(p)), "{cid}");
         }
+        for cid in [0, 3, 0xFF] {
+            assert!(!frame_packets(cid, &colors).iter().any(|p| allowed(p)), "{cid}");
+        }
+        let mut apply = frame_packets(1, &colors)[2];
+        apply[4] = 0x02; // a hardware effect mode instead of direct
+        assert!(!allowed(&apply));
+        for bad in [&[0x62, 0x01][..], &[0x72, 0x01], &[0x60, 0x01], &[0x20, 0x03, 0x01], &[0x22, 0x10, 1, 0x05]] {
+            assert!(!allowed(bad), "{bad:02x?}");
+        }
+    }
+
+    #[test]
+    fn only_lighting_commands_pass() {
+        assert!(allowed(&packet(&[0x20, 0x03], &[])));
+        assert!(frame_packets(1, &[Rgb::new(1, 2, 3)]).iter().all(|p| allowed(p)));
         // Pump curve, fan duty, fan init, Kraken init, LCD, firmware query: all blocked.
         for bad in [&[0x72, 0x01][..], &[0x62, 0x01], &[0x60, 0x03], &[0x70, 0x02], &[0x30, 0x02], &[0x36, 0x01], &[0x22, 0x40], &[0x2A, 0x04], &[]] {
             assert!(!allowed(bad), "{bad:02x?}");

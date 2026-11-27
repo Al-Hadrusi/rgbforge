@@ -6,6 +6,9 @@ After=systemd-udevd.service systemd-modules-load.service
 [Service]
 Type=simple
 ExecStart=/usr/local/bin/rgbforge --helper
+# The control socket is created with this group and mode 0660: only root and members of
+# `rgbforge` (the installer adds the desktop user) can talk to the service.
+Group=rgbforge
 Restart=on-failure
 RestartSec=2
 

@@ -24,7 +24,6 @@
 use std::fs;
 use std::io;
 use std::path::Path;
-use std::process::Command;
 
 use i2cdev::core::I2CDevice;
 use i2cdev::linux::LinuxI2CDevice;
@@ -44,7 +43,23 @@ const REG_DIRECT_V2: u16 = 0x8100;
 const REG_DIRECT_MODE: u16 = 0x8020;
 const REG_APPLY: u16 = 0x80A0;
 const APPLY_VAL: u8 = 0x01;
-const MAX_LEDS: u8 = 20;
+/// Size of each layout's colour block (OpenRGB ENESMBusController.h): 0x8000 holds 5 LEDs
+/// (15 bytes; effect colours start at 0x8010 and the mode registers at 0x8020), 0x8100
+/// holds 10 (30 bytes). A chip reporting more is refused: its extra "LEDs" would land on
+/// mode or undocumented registers.
+fn max_leds(direct_base: u16) -> u8 {
+    match direct_base {
+        REG_DIRECT_V1 => 5,
+        REG_DIRECT_V2 => 10,
+        _ => 0,
+    }
+}
+
+/// The colour registers a chip may be written at: never more than its layout's block.
+fn colour_range(direct_base: u16, leds: u8) -> std::ops::Range<u16> {
+    let n = leds.min(max_leds(direct_base));
+    direct_base..direct_base.saturating_add(u16::from(n) * 3)
+}
 
 /// Name strings OpenRGB drives, and their colour-register version.
 const KNOWN: &[(&str, u16)] = &[("DIMM_LED-0102", REG_DIRECT_V1), ("DIMM_LED-0103", REG_DIRECT_V1), ("AUDA0-E6K5-0101", REG_DIRECT_V2)];
@@ -75,14 +90,12 @@ pub fn parse_hostc(text: &str) -> Option<u8> {
 /// Is the chipset's SPD Write Disable lock on? `None` = couldn't find out.
 pub fn spd_write_disabled() -> Option<bool> {
     // 1. Authoritative: the hardware register itself, captured by root at boot.
+    // There is deliberately no fallback: kernel log text can be influenced (e.g. by USB
+    // device names), so only the register value itself counts as evidence.
     let captured = bus_pci_name()
-        .and_then(|pci| fs::read_to_string(Path::new(HOSTC_DIR).join(format!("smbus-hostc-{pci}"))).ok())
-        .and_then(|t| parse_hostc(&t));
-    if let Some(b) = captured {
-        return Some(b & HOSTC_SPD_WD != 0);
-    }
-    // 2. Fallback: i2c-i801 prints "SPD Write Disable is set" at boot on some kernels.
-    spd_write_disabled_from_log()
+        .and_then(|pci| super::root_owned_read(&Path::new(HOSTC_DIR).join(format!("smbus-hostc-{pci}"))))
+        .and_then(|t| parse_hostc(&t))?;
+    Some(captured & HOSTC_SPD_WD != 0)
 }
 
 /// PCI name (e.g. "0000:00:1f.4") of the chipset SMBus controller.
@@ -94,23 +107,8 @@ fn bus_pci_name() -> Option<String> {
     name.chars().all(|c| c.is_ascii_hexdigit() || c == ':' || c == '.').then_some(name)
 }
 
-fn spd_write_disabled_from_log() -> Option<bool> {
-    let out = Command::new("journalctl").args(["-k", "-b", "--no-pager", "-q", "-g", "i801"]).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout);
-    if text.contains("SPD Write Disable is set") {
-        return Some(true);
-    }
-    // We can only conclude "off" if we can actually see i801's boot messages.
-    if text.contains("i801") { Some(false) } else { None }
-}
-
 pub fn openrgb_running() -> bool {
-    fs::read_dir("/proc")
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| fs::read_to_string(e.path().join("comm")).ok())
-        .any(|c| c.trim().eq_ignore_ascii_case("openrgb"))
+    super::trusted_process_names().iter().any(|n| n == "openrgb")
 }
 
 /// The single chipset SMBus adapter number. Ambiguity → None.
@@ -203,7 +201,16 @@ struct Ene {
 }
 
 impl Ene {
+    /// Registers the pointer may ever be set to: the name and LED-count reads, direct mode,
+    /// apply and the colour registers. Never the slot/address registers (0x80F8/0x80F9).
+    fn pointer_allowed(&self, reg: u16) -> bool {
+        pointer_ok(reg, self.direct_base, self.leds)
+    }
+
     fn set_pointer(&mut self, reg: u16) -> io::Result<()> {
+        if !self.pointer_allowed(reg) {
+            return Err(refuse(format!("blocked register select {reg:#06x}")));
+        }
         // ENE expects the register address high byte first.
         self.dev.smbus_write_word_data(0x00, reg.swap_bytes()).map_err(err)
     }
@@ -214,8 +221,7 @@ impl Ene {
     }
 
     fn allowed(&self, reg: u16, val: u8) -> bool {
-        let colours = self.direct_base..self.direct_base.saturating_add(u16::from(self.leds) * 3);
-        (reg == REG_DIRECT_MODE && val <= 1) || (reg == REG_APPLY && val == APPLY_VAL) || colours.contains(&reg)
+        write_ok(reg, val, self.direct_base, self.leds)
     }
 
     /// The ONLY write path. Anything outside the allow-list is refused.
@@ -226,6 +232,22 @@ impl Ene {
         self.set_pointer(reg)?;
         self.dev.smbus_write_byte_data(0x01, val).map_err(err)
     }
+}
+
+/// Registers the ENE pointer may be set to (see `Ene::pointer_allowed`).
+/// The complete write allow-list: direct mode on/off, apply (never save) and the stick's
+/// own colour block.
+pub(crate) fn write_ok(reg: u16, val: u8, direct_base: u16, leds: u8) -> bool {
+    (reg == REG_DIRECT_MODE && val <= 1) || (reg == REG_APPLY && val == APPLY_VAL) || colour_range(direct_base, leds).contains(&reg)
+}
+
+pub(crate) fn pointer_ok(reg: u16, direct_base: u16, leds: u8) -> bool {
+    let colours = colour_range(direct_base, leds);
+    (REG_NAME..REG_NAME + 16).contains(&reg)
+        || reg == REG_CONFIG_LED_COUNT
+        || reg == REG_DIRECT_MODE
+        || reg == REG_APPLY
+        || (leds > 0 && colours.contains(&reg))
 }
 
 pub struct EneRam {
@@ -286,7 +308,7 @@ impl EneRam {
             return Err(refuse(format!("unknown RGB chip \"{name}\"; not touching it")));
         };
         let leds = chip.read(REG_CONFIG_LED_COUNT)?;
-        if leds == 0 || leds > MAX_LEDS {
+        if leds == 0 || leds > max_leds(*base) {
             return Err(refuse(format!("implausible LED count {leds}; not touching it")));
         }
         let original_direct = chip.read(REG_DIRECT_MODE)?;
@@ -358,12 +380,70 @@ impl Driver for EneRam {
 #[allow(clippy::unwrap_used)]
 mod tests {
     use super::*;
+    use crate::drivers::root_owned_read;
 
     #[test]
     fn address_range_excludes_spd_and_pmic() {
         for a in ADDRESSES {
             assert!(!(0x48..=0x5F).contains(&a));
         }
+    }
+
+    #[test]
+    fn evidence_file_must_be_root_owned_and_unwritable_by_others() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("rgbforge-hostc-{}", std::process::id()));
+        fs::create_dir_all(&dir).unwrap();
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o755)).unwrap();
+        let good = dir.join("good");
+        fs::write(&good, " 11\n").unwrap();
+        fs::set_permissions(&good, fs::Permissions::from_mode(0o644)).unwrap();
+        let writable = dir.join("writable");
+        fs::write(&writable, " 11\n").unwrap();
+        fs::set_permissions(&writable, fs::Permissions::from_mode(0o666)).unwrap();
+        let link = dir.join("link");
+        std::os::unix::fs::symlink(&good, &link).unwrap();
+        assert_eq!(root_owned_read(&writable), None, "world-writable file must be refused");
+        assert_eq!(root_owned_read(&link), None, "symlink must be refused");
+        let running_as_root = fs::metadata(&good).map(|m| std::os::unix::fs::MetadataExt::uid(&m) == 0).unwrap_or(false);
+        assert_eq!(root_owned_read(&good).is_some(), running_as_root, "accepted only when root-owned");
+        fs::set_permissions(&dir, fs::Permissions::from_mode(0o777)).unwrap();
+        assert_eq!(root_owned_read(&good), None, "writable folder must be refused");
+        fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn register_select_never_reaches_address_or_save_registers() {
+        // Before identification (no LEDs known): only name and LED-count reads, mode, apply.
+        assert!(pointer_ok(REG_NAME + 5, 0, 0) && pointer_ok(REG_CONFIG_LED_COUNT, 0, 0));
+        assert!(!pointer_ok(REG_DIRECT_V1, 0, 0));
+        // After identification: the stick's own colour registers too, nothing beyond them.
+        assert!(pointer_ok(REG_DIRECT_V2 + 29, REG_DIRECT_V2, 10));
+        assert!(!pointer_ok(REG_DIRECT_V2 + 30, REG_DIRECT_V2, 10));
+        // Slot index / I2C address registers (address remapping) can never be selected.
+        for reg in [0x80F8, 0x80F9, 0x1030, 0x0000, 0xFFFF] {
+            assert!(!pointer_ok(reg, REG_DIRECT_V1, 20), "{reg:#06x}");
+        }
+    }
+
+    #[test]
+    fn colour_writes_never_reach_effect_or_mode_registers() {
+        // However many LEDs a chip claims, colour writes stay inside its layout's block.
+        for leds in 0..=u8::MAX {
+            for reg in 0x8010..=0x80FFu16 {
+                // Only the two documented single-purpose registers, with their safe values.
+                let ok = (0..=u8::MAX).any(|v| write_ok(reg, v, REG_DIRECT_V1, leds));
+                assert_eq!(ok, reg == REG_DIRECT_MODE || reg == REG_APPLY, "v1 leds={leds} reg={reg:#06x}");
+            }
+            for reg in 0x811E..=0x81FFu16 {
+                assert!(!write_ok(reg, 0, REG_DIRECT_V2, leds), "v2 leds={leds} reg={reg:#06x}");
+            }
+        }
+        assert!(!write_ok(REG_DIRECT_MODE, 2, REG_DIRECT_V1, 5), "direct mode only takes 0 or 1");
+        assert!(!write_ok(REG_APPLY, 0xAA, REG_DIRECT_V1, 5), "save is never allowed");
+        assert!(write_ok(REG_DIRECT_V1 + 14, 0xFF, REG_DIRECT_V1, 5));
+        assert_eq!(max_leds(REG_DIRECT_V1), 5);
+        assert_eq!(max_leds(REG_DIRECT_V2), 10);
     }
 
     #[test]

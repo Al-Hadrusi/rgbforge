@@ -149,13 +149,7 @@ pub(crate) fn show_frame_packet(model: &Model) -> [u8; REPORT] {
 
 /// Process names of other Razer tools that would talk to the same device.
 pub fn conflicting_tool_running() -> Option<&'static str> {
-    let names: Vec<String> = std::fs::read_dir("/proc")
-        .into_iter()
-        .flatten()
-        .flatten()
-        .filter_map(|e| std::fs::read_to_string(e.path().join("comm")).ok())
-        .map(|c| c.trim().to_ascii_lowercase())
-        .collect();
+    let names = super::trusted_process_names();
     if names.iter().any(|n| n.starts_with("openrazer")) {
         Some("OpenRazer")
     } else if names.iter().any(|n| n == "openrgb") {
@@ -206,10 +200,20 @@ impl Razer {
     /// Open `hid` if it is the device's lighting interface: it must answer a read-only
     /// firmware query correctly before anything else is sent.
     pub fn open(hid: &HidInfo, model: &Model) -> io::Result<Self> {
-        OpenOptions::new().read(true).write(true).open(&hid.node)?; // explain permissions clearly
-        let api = hidapi::HidApi::new().map_err(err)?;
+        // Plain open first (clear permission errors), then confirm it is the identified device.
+        // Holding this handle while hidapi opens the same node, and re-checking afterwards,
+        // means a swapped device can't slip in between the checks.
+        let probe = OpenOptions::new().read(true).write(true).open(&hid.node)?;
+        crate::hidraw::verify_opened(hid, &probe)?;
+        let api = hidapi::HidApi::new().map_err(err)?; // discovery is disabled in main()
         let path = CString::new(hid.node.to_string_lossy().as_bytes()).map_err(err)?;
         let dev = api.open_path(&path).map_err(err)?;
+        crate::hidraw::verify_opened(hid, &probe)?;
+        let now = std::fs::metadata(&hid.node)?;
+        if std::os::unix::fs::MetadataExt::rdev(&now) != std::os::unix::fs::MetadataExt::rdev(&probe.metadata()?) {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "device changed while opening"));
+        }
+        drop(probe);
         let leds = u16::from(model.rows) * u16::from(model.cols);
         let me = Self {
             dev,

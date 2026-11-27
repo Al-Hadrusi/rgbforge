@@ -32,3 +32,7 @@ as possible, and you'll be credited unless you'd rather not be.
   and identifies chips with reads before any write.
 - No `unsafe` code in RGB Forge itself (compiler-enforced); CI runs strict lints, all tests
   and a RustSec dependency audit on every change and weekly.
+
+## Hardware allow-lists
+
+What each driver may send, what it was checked against, and what is still open: [docs/ALLOWLIST-REVIEW.md](docs/ALLOWLIST-REVIEW.md). Reviews of any protocol are welcome.

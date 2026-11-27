@@ -15,10 +15,24 @@ No OpenRGB, no background services, no root.
 
 ## Install
 
-**Easiest:** download the ready-made `rgbforge-…-x86_64-linux.tar.gz` from
-[Releases](https://github.com/Al-Hadrusi/rgbforge/releases/latest), then:
+**Easiest (verified):** download the release installer, read it, then run it. It downloads the
+latest release and refuses to unpack anything unless the file matches GitHub's own checksum *and*
+its signature proves it was built by this repository's release workflow:
 
 ```bash
+curl -fsSLO https://raw.githubusercontent.com/Al-Hadrusi/rgbforge/main/get.sh
+less get.sh
+bash get.sh
+```
+
+The signature check needs either the GitHub CLI, logged in (`sudo pacman -S github-cli`, then
+`gh auth login`), or `cosign` (`sudo pacman -S cosign`).
+
+**Manual:** download `rgbforge-…-x86_64-linux.tar.gz` from
+[Releases](https://github.com/Al-Hadrusi/rgbforge/releases/latest), verify it, then install:
+
+```bash
+gh attestation verify rgbforge-*-x86_64-linux.tar.gz --repo Al-Hadrusi/rgbforge --signer-workflow Al-Hadrusi/rgbforge/.github/workflows/release.yml
 tar -xzf rgbforge-*-x86_64-linux.tar.gz && cd rgbforge-*-x86_64-linux && ./install.sh
 ```
 
@@ -143,8 +157,18 @@ on some coolers, pump control). Now:
 - **No device permissions for users.** The udev rule grants nothing; device nodes stay root-only.
 - **A narrow service.** `rgbforge-helper` (systemd) accepts only *list devices*, *show these colours*,
   *set an LED count* and *run a read-only check* over a local socket. There is no "send raw bytes"
-  request, and every write still passes the driver's allow-list. Any local program may connect, but
-  the most it can do is change colours. Messages are size-limited and validated; frames are trimmed
+  request, and every write still passes the driver's allow-list. Only root and members of the
+  `rgbforge` group (the installer adds your account) may connect, and even they can only change
+  colours. The service also asks the kernel who is connecting and refuses anyone else even if the
+  socket's permissions were ever mis-set.
+- **Administrator switch for RAM and graphics cards.** Their drivers only start if the root-owned
+  file `/etc/rgbforge/hardware-allow` allows them (`sudo rgbforge --allow-hardware ram,gpu`, or
+  `none`; the installer asks once). A program running as your account can change colours, but
+  can't turn RAM or GPU writes on. A file anyone but root could change counts as "allow nothing".
+- **Audit trail.** Security-relevant actions (connections refused, device scans with the RAM/GPU
+  opt-ins, LED-count changes, read-only checks, writes a safety list blocked) are logged with the
+  caller's user and process ID: `journalctl -u rgbforge-helper | grep audit`. Colours and message
+  contents are never logged. Messages are size-limited and validated; frames are trimmed
   to each device's real size; rate limits are enforced in the service itself.
 - **Sandboxed.** The service has no capabilities, no network, no access to home folders, a read-only
   system view, can only open I²C and USB-HID device nodes, and runs with a restricted system-call set.

@@ -1,46 +1,85 @@
 name: Release
 
 # Publish a release on GitHub (Releases → Draft a new release → tag like v0.1.0 → Publish).
-# This workflow then builds, tests and attaches the ready-to-run Linux download to it.
+# The "build" job then builds and tests with READ-ONLY access; the separate "publish" job,
+# which runs no project or dependency code, attaches the download to the release.
 on:
   release:
     types: [published]
 
-permissions:
-  contents: write
+permissions: {}
 
 jobs:
-  release:
-    name: Build and publish
+  build:
+    name: Build and test
     # Built on an older Ubuntu so the program also runs on older distributions (glibc 2.35+).
     runs-on: ubuntu-22.04
+    permissions:
+      contents: read
     steps:
-      - uses: actions/checkout@v4
-      - uses: dtolnay/rust-toolchain@stable
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4.4.0
+        with:
+          persist-credentials: false # build scripts must not find a token on disk
+      - uses: dtolnay/rust-toolchain@39008827e6b4319a349e9a42dfc90579dd25f1ca # stable
       - name: Tests (incl. every driver's write allow-list)
         run: cargo test --locked
       - name: Build
         run: cargo build --release --locked
       - name: Package
+        env:
+          # Passed through the environment, never pasted into the script: a tag name
+          # could otherwise inject shell commands (GitHub Actions expression injection).
+          TAG: ${{ github.event.release.tag_name }}
         run: |
-          TAG="${{ github.event.release.tag_name }}"
+          case "$TAG" in v[0-9]*) ;; *) echo "Unexpected tag name"; exit 1;; esac
           VERSION="${TAG#v}"
+          case "$VERSION" in *[!0-9A-Za-z.+-]*) echo "Unexpected version characters"; exit 1;; esac
           NAME="rgbforge-${VERSION}-x86_64-linux"
-          mkdir -p "$NAME/packaging"
+          mkdir -p "$NAME/packaging" dist
           cp target/release/rgbforge install.sh README.md LICENSE SECURITY.md "$NAME/"
           cp packaging/rgbforge.desktop packaging/rgbforge-helper.service "$NAME/packaging/"
           strip "$NAME/rgbforge"
-          tar -czf "$NAME.tar.gz" "$NAME"
-          sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256"
-          ls -la "$NAME.tar.gz"*
-      - name: Attach the download to the release
+          tar -czf "dist/$NAME.tar.gz" "$NAME"
+          (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")
+          cp .github/release-notes.md dist/release-notes.md
+          ls -la dist
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: release
+          path: dist/
+          if-no-files-found: error
+
+  publish:
+    name: Attach to release
+    needs: build
+    runs-on: ubuntu-latest
+    permissions:
+      contents: write      # upload release assets
+      id-token: write      # sign the build attestation
+      attestations: write
+    steps:
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093 # v4.3.0
+        with:
+          name: release
+          path: dist
+      - name: Attest build provenance
+        id: attest
+        uses: actions/attest-build-provenance@e8998f949152b193b063cb0ec769d69d929409be # v2.4.0
+        with:
+          subject-path: dist/rgbforge-*.tar.gz
+      - name: Upload to the release
         env:
           GH_TOKEN: ${{ github.token }}
+          GH_REPO: ${{ github.repository }}
           TAG: ${{ github.event.release.tag_name }}
           BODY: ${{ github.event.release.body }}
+          BUNDLE: ${{ steps.attest.outputs.bundle-path }}
         run: |
-          gh release upload "$TAG" rgbforge-*.tar.gz rgbforge-*.tar.gz.sha256 --clobber
+          # The signed provenance bundle goes next to the download, so get.sh (and anyone with
+          # cosign) can verify it without a GitHub login.
+          for f in dist/rgbforge-*.tar.gz; do cp "$BUNDLE" "$f.sigstore.json"; done
+          gh release upload "$TAG" dist/rgbforge-*.tar.gz dist/rgbforge-*.tar.gz.sha256 dist/rgbforge-*.tar.gz.sigstore.json --clobber
           # Fill in the standard install notes if the release was published without any.
           if [ -z "$(printf '%s' "$BODY" | tr -d '[:space:]')" ]; then
-            gh release edit "$TAG" --notes-file .github/release-notes.md
+            gh release edit "$TAG" --notes-file dist/release-notes.md
           fi

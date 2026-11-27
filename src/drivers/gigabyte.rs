@@ -40,7 +40,18 @@ pub(crate) fn allowed(pkt: &[u8]) -> bool {
         [REPORT_ID, 0x20..=0x27, rest @ ..] => rest.get(9) == Some(&0x01),
         // Commit, never with an all-zero mask (that cancels pending changes).
         [REPORT_ID, 0x28, mask @ ..] => mask.iter().take(8).any(|b| *b != 0),
-        [REPORT_ID, 0x32, ..] | [REPORT_ID, 0x34, ..] | [REPORT_ID, 0x58 | 0x59, ..] => true,
+        // Per-LED mode for D_LED1 + D_LED2 only (the two headers this driver drives).
+        [REPORT_ID, 0x32, 0x03, rest @ ..] => rest.iter().all(|b| *b == 0),
+        // LED-count codes for the six headers, two per byte; valid codes are 0-4
+        // (32/64/256/512/1024 LEDs, OpenRGB's LedCount).
+        [REPORT_ID, 0x34, a, b, c, rest @ ..] => {
+            [a, b, c].iter().all(|v| (**v & 0x0F) <= 4 && (**v >> 4) <= 4) && rest.iter().all(|b| *b == 0)
+        }
+        // Direct colours: whole LEDs, at most 19 per packet, inside the 256-LED string.
+        [REPORT_ID, 0x58 | 0x59, lo, hi, len, ..] => {
+            let end = usize::from(u16::from_le_bytes([*lo, *hi])) + usize::from(*len);
+            usize::from(*len) <= LEDS_PER_PACKET * 3 && *len % 3 == 0 && end <= usize::from(MAX_LEDS) * 3
+        }
         // Turn off the board's audio-reactive mode / LampArray mode: value 0 only.
         [REPORT_ID, 0x31 | 0x48, 0x00, ..] => true,
         _ => false,
@@ -120,6 +131,8 @@ pub struct Gigabyte {
     orders: [[usize; 3]; 2],
     direct_ready: bool,
     sizes_sent: Option<(u8, u8)>,
+    /// LED-count codes of headers 3-6 as the board reported them; sent back unchanged.
+    other_counts: (u8, u8),
 }
 
 impl Gigabyte {
@@ -132,10 +145,20 @@ impl Gigabyte {
 
     pub fn open(hid: &HidInfo, name: &str) -> io::Result<Self> {
         // Check permissions with a plain open first, so the app can explain a missing udev rule.
-        OpenOptions::new().read(true).write(true).open(&hid.node)?;
+        // Plain open first (clear permission errors), then confirm it is the identified device.
+        // Holding this handle while hidapi opens the same node, and re-checking afterwards,
+        // means a swapped device can't slip in between the checks.
+        let probe = OpenOptions::new().read(true).write(true).open(&hid.node)?;
+        crate::hidraw::verify_opened(hid, &probe)?;
         let api = hidapi::HidApi::new().map_err(err)?; // discovery is disabled in main()
         let path = CString::new(hid.node.to_string_lossy().as_bytes()).map_err(err)?;
         let dev = api.open_path(&path).map_err(err)?;
+        crate::hidraw::verify_opened(hid, &probe)?;
+        let now = std::fs::metadata(&hid.node)?;
+        if std::os::unix::fs::MetadataExt::rdev(&now) != std::os::unix::fs::MetadataExt::rdev(&probe.metadata()?) {
+            return Err(std::io::Error::new(std::io::ErrorKind::PermissionDenied, "device changed while opening"));
+        }
+        drop(probe);
         let mut me = Self {
             dev,
             info: DeviceInfo {
@@ -150,6 +173,7 @@ impl Gigabyte {
             orders: [[1, 0, 2]; 2],
             direct_ready: false,
             sizes_sent: None,
+            other_counts: (0, 0),
         };
 
         // Identify. The reply must look like an ITE RGB controller, or we stop here.
@@ -172,6 +196,11 @@ impl Gigabyte {
         }
         let cal = |at: usize| reply.get(at..at + 4).and_then(|s| <[u8; 4]>::try_from(s).ok()).map_or(0, u32::from_le_bytes);
         me.orders = [order_from_calibration(cal(44)), order_from_calibration(cal(48))];
+        // IT8297Report bytes 9-10: LED-count codes of headers 3/4 and 5/6. Keep them, so
+        // setting our two headers' counts doesn't change headers this driver doesn't drive.
+        let valid = |v: u8| (v & 0x0F) <= 4 && (v >> 4) <= 4;
+        let keep = |at: usize| reply.get(at).copied().filter(|v| valid(*v)).unwrap_or(0);
+        me.other_counts = (keep(9), keep(10));
         let flags = reply.get(11).copied().unwrap_or(0);
         if flags & 0x02 != 0 {
             me.send(&packet(&[REPORT_ID, 0x48, 0x00]))?; // LampArray mode off
@@ -208,7 +237,7 @@ impl Driver for Gigabyte {
         let size = |i: usize| count_code(self.info.zones.get(i).map_or(0, |z| z.leds));
         let sizes = (size(1), size(2));
         if self.sizes_sent != Some(sizes) {
-            self.send(&packet(&[REPORT_ID, 0x34, (sizes.1 << 4) | sizes.0, 0x00, 0x00]))?;
+            self.send(&packet(&[REPORT_ID, 0x34, (sizes.1 << 4) | sizes.0, self.other_counts.0, self.other_counts.1]))?;
             self.sizes_sent = Some(sizes);
         }
         if let Some(c) = frame.first().and_then(|z| z.first()) {
@@ -238,6 +267,23 @@ impl Driver for Gigabyte {
 #[allow(clippy::indexing_slicing)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn payloads_of_mode_count_and_colour_packets_are_bounded() {
+        assert!(allowed(&packet(&[REPORT_ID, 0x32, 0x03])));
+        assert!(!allowed(&packet(&[REPORT_ID, 0x32, 0xFF])), "only headers 1+2");
+        assert!(!allowed(&packet(&[REPORT_ID, 0x32, 0x03, 0x01])));
+        assert!(allowed(&packet(&[REPORT_ID, 0x34, 0x21, 0x44, 0x00])));
+        assert!(!allowed(&packet(&[REPORT_ID, 0x34, 0x05, 0x00, 0x00])), "no such LED-count code");
+        assert!(!allowed(&packet(&[REPORT_ID, 0x34, 0x00, 0x00, 0x00, 0x09])));
+        assert!(allowed(&packet(&[REPORT_ID, 0x58, 0xC7, 0x02, 57])), "711 + 57 = 768: the last LED");
+        assert!(!allowed(&packet(&[REPORT_ID, 0x58, 0xCA, 0x02, 57])), "714 + 57 = 771: past the end");
+        assert!(!allowed(&packet(&[REPORT_ID, 0x58, 0x00, 0x03, 3])), "past the 256-LED string");
+        assert!(!allowed(&packet(&[REPORT_ID, 0x59, 0, 0, 60])), "more than 19 LEDs");
+        assert!(!allowed(&packet(&[REPORT_ID, 0x59, 0, 0, 4])), "partial LED");
+        let colors = vec![Rgb::new(1, 2, 3); 256];
+        assert!(direct_packets(0x59, &colors, [0, 1, 2]).iter().all(|p| allowed(p)));
+    }
 
     #[test]
     fn flash_and_calibration_writes_are_blocked() {

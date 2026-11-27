@@ -10,7 +10,7 @@
 mod aura;
 mod corsair;
 mod asrock;
-mod demo;
+pub(crate) mod demo;
 mod gigabyte;
 mod lianli;
 mod nzxt;
@@ -136,6 +136,64 @@ pub enum DemoMode {
     Never,
 }
 
+/// Lower-cased names of processes run by root or by members of the `rgbforge` group.
+/// Used to avoid fighting other RGB tools over a device; processes of other accounts are
+/// ignored, so they can't pause RGB Forge just by naming a process "openrgb".
+pub fn trusted_process_names() -> Vec<String> {
+    let group = std::fs::read_to_string("/etc/group").unwrap_or_default();
+    let passwd = std::fs::read_to_string("/etc/passwd").unwrap_or_default();
+    let uids = trusted_uids(&group, &passwd);
+    std::fs::read_dir("/proc")
+        .into_iter()
+        .flatten()
+        .flatten()
+        .filter_map(|e| {
+            let status = std::fs::read_to_string(e.path().join("status")).ok()?;
+            uids.contains(&real_uid(&status)?).then_some(())?;
+            Some(std::fs::read_to_string(e.path().join("comm")).ok()?.trim().to_ascii_lowercase())
+        })
+        .collect()
+}
+
+/// Read a small file only if it and its folder are root-owned and writable by root alone
+/// (regular file, at most 64 bytes, no symlinks). Anything else counts as absent.
+pub(crate) fn root_owned_read(path: &std::path::Path) -> Option<String> {
+    use std::os::unix::fs::MetadataExt;
+    let trusted = |m: &std::fs::Metadata| m.uid() == 0 && m.mode() & 0o022 == 0;
+    let dir = std::fs::symlink_metadata(path.parent()?).ok()?;
+    let file = std::fs::symlink_metadata(path).ok()?;
+    (dir.is_dir() && trusted(&dir) && file.file_type().is_file() && trusted(&file) && file.len() <= 64)
+        .then(|| std::fs::read_to_string(path).ok())
+        .flatten()
+}
+
+/// root, plus every account in the `rgbforge` group (listed members or primary group).
+pub(crate) fn trusted_uids(group: &str, passwd: &str) -> Vec<u32> {
+    let mut uids = vec![0];
+    let Some((gid, members)) = group.lines().find_map(|l| {
+        let f: Vec<&str> = l.split(':').collect();
+        (f.first() == Some(&"rgbforge")).then(|| (f.get(2).copied().unwrap_or(""), f.get(3).copied().unwrap_or("")))
+    }) else {
+        return uids;
+    };
+    let members: Vec<&str> = members.split(',').filter(|m| !m.is_empty()).collect();
+    for l in passwd.lines() {
+        let f: Vec<&str> = l.split(':').collect();
+        let (Some(name), Some(uid), Some(pgid)) = (f.first(), f.get(2), f.get(3)) else { continue };
+        if (members.contains(name) || *pgid == gid)
+            && let Ok(u) = uid.parse()
+        {
+            uids.push(u);
+        }
+    }
+    uids
+}
+
+/// The real uid from a /proc/<pid>/status text.
+pub(crate) fn real_uid(status: &str) -> Option<u32> {
+    status.lines().find_map(|l| l.strip_prefix("Uid:")).and_then(|v| v.split_whitespace().next()).and_then(|v| v.parse().ok())
+}
+
 /// The simulated devices (added by the app, never by the hardware service).
 pub fn demo_devices() -> Vec<Box<dyn Driver>> {
     demo::devices()
@@ -147,8 +205,18 @@ pub struct Detection {
     pub problems: Vec<String>,
 }
 
-pub fn detect(demo: DemoMode, gpu: bool, ram: bool) -> Detection {
+/// The RAM and graphics-card drivers only start when both the app asks for them and the
+/// administrator's switch (see [`crate::policy`]) allows them.
+pub fn detect_with(demo: DemoMode, gpu: bool, ram: bool, allow: crate::policy::Allow) -> Detection {
     let mut d = detect_from(hidraw::enumerate(), demo);
+    let locked: Vec<&str> = [(ram && !allow.ram, "ram"), (gpu && !allow.gpu, "gpu")]
+        .into_iter()
+        .filter_map(|(l, w)| l.then_some(w))
+        .collect();
+    if !locked.is_empty() {
+        d.problems.push(locked_message(&locked));
+    }
+    let (gpu, ram) = (gpu && allow.gpu, ram && allow.ram);
     if gpu {
         match sapphire::find_card(std::path::Path::new("/sys/bus/pci/devices")) {
             None => d.problems.push(format!("Graphics card lighting is on, but no {} was found.", sapphire::NAME)),
@@ -183,6 +251,18 @@ fn is_razer(h: &HidInfo) -> bool {
 }
 
 const RAZER_VID: u16 = 0x1532;
+
+pub fn locked_message(locked: &[&str]) -> String {
+    let what = match locked {
+        [w] if *w == "ram" => "RAM lighting is",
+        [_] => "Graphics card lighting is",
+        _ => "RAM and graphics card lighting are",
+    };
+    format!(
+        "{what} locked for safety. To allow it, run once in a terminal: sudo rgbforge --allow-hardware {}",
+        locked.join(",")
+    )
+}
 
 pub fn detect_from(hids: Vec<HidInfo>, demo: DemoMode) -> Detection {
     let mut drivers: Vec<Box<dyn Driver>> = Vec::new();
@@ -271,6 +351,15 @@ mod tests {
     use super::*;
 
     #[test]
+    fn ram_and_gpu_stay_off_unless_the_administrator_allows_them() {
+        // The app asks for both; the administrator's switch allows neither.
+        let d = detect_with(DemoMode::Never, true, true, crate::policy::Allow::default());
+        assert!(d.drivers.iter().all(|x| !matches!(x.info().kind, crate::model::Kind::Ram | crate::model::Kind::Gpu)));
+        assert!(d.problems.iter().any(|p| p.contains("sudo rgbforge --allow-hardware ram,gpu")), "{:?}", d.problems);
+        assert_eq!(locked_message(&["gpu"]), "Graphics card lighting is locked for safety. To allow it, run once in a terminal: sudo rgbforge --allow-hardware gpu");
+    }
+
+    #[test]
     fn unknown_devices_are_ignored() {
         let keyboard = HidInfo {
             node: "/dev/hidraw0".into(),
@@ -296,6 +385,18 @@ mod tests {
     fn demo_mode() {
         assert!(!detect_from(vec![], DemoMode::Auto).drivers.is_empty());
         assert!(detect_from(vec![], DemoMode::Never).drivers.is_empty());
+    }
+
+    #[test]
+    fn only_root_and_rgbforge_members_are_trusted() {
+        let group = "root:x:0:\nrgbforge:x:977:alice,bob\nwheel:x:10:carol\n";
+        let passwd = "root:x:0:0::/root:/bin/sh\nalice:x:1000:1000::/h:/bin/sh\nbob:x:1001:1001::/h:/bin/sh\ncarol:x:1002:1002::/h:/bin/sh\nsvc:x:990:977::/:/bin/false\n";
+        let mut u = trusted_uids(group, passwd);
+        u.sort_unstable();
+        assert_eq!(u, vec![0, 990, 1000, 1001]); // carol (other account) is not trusted
+        assert_eq!(trusted_uids("", ""), vec![0]);
+        assert_eq!(real_uid("Name:\topenrgb\nUid:\t1002\t1002\t1002\t1002\n"), Some(1002));
+        assert_eq!(real_uid("garbage"), None);
     }
 
     #[test]
