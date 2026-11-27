@@ -8,7 +8,7 @@ Please report privately:
 - any way to make RGB Forge or `rgbforge-helper` send a command outside a driver's allow-list
   (for example pump/fan speed, save-to-flash, firmware, or anything to RAM settings chips),
 - crashes or hangs of `rgbforge-helper` caused by input from its socket,
-- problems in the installer, the systemd service or the udev rule.
+- problems in the installer, the systemd or OpenRC service or the udev rule.
 
 ## How to report
 
@@ -23,7 +23,7 @@ as possible, and you'll be credited unless you'd rather not be.
 
 ## Security design (summary)
 
-- Only `rgbforge-helper` (a sandboxed systemd service) can access lighting hardware. Users and
+- Only `rgbforge-helper` (a service that sandboxes itself; under systemd also sandboxed by the unit) can access lighting hardware. Users and
   other programs get no device permissions; the helper accepts only "list devices / show these
   colours / change an LED count / run a read-only check" requests.
 - Every driver checks every outgoing write against a byte-level allow-list; cooling, flash,

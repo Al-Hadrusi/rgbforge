@@ -26,6 +26,10 @@ jobs:
         run: cargo clippy --all-targets --locked -- -D warnings
       - name: Tests (incl. every driver's write allow-list)
         run: cargo test --locked
+      - name: Shell scripts (installer, verifying installer, OpenRC service)
+        run: |
+          shellcheck install.sh get.sh
+          shellcheck -s sh -e SC2034 packaging/rgbforge-helper.openrc
       - name: No device permissions for users in the udev rules
         run: |
           cargo run --locked --quiet -- --print-udev-rules > rules.txt

@@ -13,6 +13,7 @@ mod hidraw;
 mod model;
 mod policy;
 mod proto;
+mod sandbox;
 mod remote;
 mod sensors;
 mod ui;

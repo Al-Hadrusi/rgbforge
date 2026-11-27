@@ -42,6 +42,10 @@ tar -xzf rgbforge-*-x86_64-linux.tar.gz && cd rgbforge-*-x86_64-linux && ./insta
 ./install.sh
 ```
 
+Works with **systemd** (Arch, Fedora, Ubuntu, Debian, ...) and **OpenRC** (Gentoo, Artix, Alpine,
+...); the installer detects which one your PC uses, and uses `sudo` or `doas`. On Gentoo, install
+the build tools first: `sudo emerge --ask dev-lang/rust-bin dev-vcs/git`.
+
 Run it as your normal user (not with `sudo`); it asks for your password for the system steps. It:
 
 1. builds RGB Forge and installs it to `/usr/local/bin/rgbforge` (root-owned, so nothing can tamper with it),
@@ -155,7 +159,7 @@ direct access to the controllers and buses, which meant any program you ran had 
 on some coolers, pump control). Now:
 
 - **No device permissions for users.** The udev rule grants nothing; device nodes stay root-only.
-- **A narrow service.** `rgbforge-helper` (systemd) accepts only *list devices*, *show these colours*,
+- **A narrow service.** `rgbforge-helper` (a systemd or OpenRC service) accepts only *list devices*, *show these colours*,
   *set an LED count* and *run a read-only check* over a local socket. There is no "send raw bytes"
   request, and every write still passes the driver's allow-list. Only root and members of the
   `rgbforge` group (the installer adds your account) may connect, and even they can only change
@@ -167,12 +171,17 @@ on some coolers, pump control). Now:
   can't turn RAM or GPU writes on. A file anyone but root could change counts as "allow nothing".
 - **Audit trail.** Security-relevant actions (connections refused, device scans with the RAM/GPU
   opt-ins, LED-count changes, read-only checks, writes a safety list blocked) are logged with the
-  caller's user and process ID: `journalctl -u rgbforge-helper | grep audit`. Colours and message
+  caller's user and process ID: `journalctl -u rgbforge-helper | grep audit` (systemd) or
+  `grep audit /var/log/rgbforge-helper.log` (OpenRC). Colours and message
   contents are never logged. Messages are size-limited and validated; frames are trimmed
   to each device's real size; rate limits are enforced in the service itself.
-- **Sandboxed.** The service has no capabilities, no network, no access to home folders, a read-only
-  system view, can only open I²C and USB-HID device nodes, and runs with a restricted system-call set.
-  `systemd-analyze security rgbforge-helper` rates it **1.1 / 10 ("OK")**.
+- **Sandboxed.** The service sandboxes itself as soon as it starts, under any init system: it drops
+  every capability, sets no-new-privileges, and (on kernels with Landlock, Linux 5.13+) can only
+  read `/etc`, `/sys`, `/proc` and `/run` and use device nodes in `/dev`: no home folders, no
+  writing system files, no running programs. Its log's first lines say what was enforced.
+  Under systemd it additionally gets no network, a read-only system view, access to only I²C and
+  USB-HID device nodes and a restricted system-call set; `systemd-analyze security rgbforge-helper`
+  rates it **1.1 / 10 ("OK")**. OpenRC has no equivalent of those extra systemd protections.
 - **Tamper-resistant install.** The binary the service runs lives in root-owned `/usr/local/bin`.
 - **Supply chain.** `Cargo.lock` is committed; CI runs a RustSec dependency audit on every change and
   weekly, and Dependabot proposes updates.
@@ -190,6 +199,7 @@ Found a problem? See [SECURITY.md](SECURITY.md) to report it privately.
 | `src/hidraw.rs` | Safe USB HID access |
 | `src/helper.rs`, `src/proto.rs`, `src/remote.rs` | The hardware service, its message format, and the app side |
 | `packaging/rgbforge-helper.service` | The sandboxed systemd service |
+| `packaging/rgbforge-helper.openrc` | The same service for OpenRC (Gentoo, Artix, Alpine, ...) |
 | `src/config.rs` | Settings and saved looks (`~/.config/rgbforge/settings.json`) |
 
 ## Development

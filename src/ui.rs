@@ -680,7 +680,7 @@ impl App<'_> {
                 egui::ScrollArea::vertical().show(ui, |ui| {
                     egui::CollapsingHeader::new(RichText::new("My device isn't showing up").strong()).default_open(true).show(ui, |ui| {
                         ui.label("For security, only RGB Forge's small hardware service (rgbforge-helper) may talk to lighting hardware; this app asks it to. If no real devices show up, make sure the service is running, then click \"Find devices\":");
-                        let cmd = "sudo systemctl enable --now rgbforge-helper";
+                        let cmd = crate::remote::start_service_command();
                         egui::Frame::new().fill(BG).corner_radius(8).inner_margin(10).show(ui, |ui| {
                             ui.add(egui::Label::new(RichText::new(cmd).monospace().color(TEXT)).wrap());
                         });
