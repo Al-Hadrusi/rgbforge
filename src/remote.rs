@@ -105,7 +105,23 @@ impl Driver for RemoteDriver {
     }
 }
 
-pub const NOT_RUNNING: &str = "RGB Forge's hardware service isn't running, so real devices can't be controlled. Re-run ./install.sh, or run: sudo systemctl enable --now rgbforge-helper";
+/// The command that starts the hardware service now and at every boot, for this PC's init
+/// system (systemd, or OpenRC as on Gentoo).
+pub fn start_service_command() -> &'static str {
+    start_command_for(std::path::Path::new("/run/systemd/system").is_dir())
+}
+
+pub fn start_command_for(systemd: bool) -> &'static str {
+    if systemd {
+        "sudo systemctl enable --now rgbforge-helper"
+    } else {
+        "sudo rc-update add rgbforge-helper default && sudo rc-service rgbforge-helper start"
+    }
+}
+
+pub fn not_running() -> String {
+    format!("RGB Forge's hardware service isn't running, so real devices can't be controlled. Re-run ./install.sh, or run: {}", start_service_command())
+}
 pub const NOT_IN_GROUP: &str = "You're not allowed to use RGB Forge's hardware service yet. Log out and back in (or restart) once after installing, so your account joins the 'rgbforge' group.";
 
 /// Find devices through the helper; demo devices are added here in the app.
@@ -127,7 +143,7 @@ pub fn detect(demo: DemoMode, gpu: bool, ram: bool) -> Detection {
             problems,
         ),
         Err(e) if e.kind() == io::ErrorKind::PermissionDenied => (Vec::new(), vec![NOT_IN_GROUP.to_string()]),
-        Err(_) => (Vec::new(), vec![NOT_RUNNING.to_string()]),
+        Err(_) => (Vec::new(), vec![not_running()]),
     };
     let show_demo = match demo {
         DemoMode::Always => true,
@@ -139,4 +155,16 @@ pub fn detect(demo: DemoMode, gpu: bool, ram: bool) -> Detection {
     }
     problems.dedup();
     Detection { drivers: found, problems }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn start_command_matches_the_init_system() {
+        assert_eq!(start_command_for(true), "sudo systemctl enable --now rgbforge-helper");
+        assert!(start_command_for(false).contains("rc-service rgbforge-helper start"));
+        assert!(not_running().contains(start_service_command()));
+    }
 }

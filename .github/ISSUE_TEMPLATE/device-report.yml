@@ -49,7 +49,7 @@ body:
   - type: textarea
     id: service
     attributes:
-      label: Output of `systemctl status rgbforge-helper`
+      label: "Output of `systemctl status rgbforge-helper` (on OpenRC, `rc-service rgbforge-helper status` and `/var/log/rgbforge-helper.log`)"
       render: text
   - type: input
     id: system

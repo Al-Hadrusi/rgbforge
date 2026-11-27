@@ -1,0 +1,37 @@
+#!/sbin/openrc-run
+# RGB Forge hardware service for OpenRC (Gentoo, Artix, Alpine, Devuan with OpenRC, ...).
+# Installed to /etc/init.d/rgbforge-helper by install.sh.
+#
+# It is the only process allowed to touch RGB lighting hardware. It starts as root only so
+# it can open root-owned device nodes, then sandboxes itself before accepting any request:
+# every capability is dropped, no-new-privileges is set, and (on kernels with Landlock)
+# file access is confined to /etc, /sys, /proc, /run (read) and /dev (devices).
+# Check what was enforced in the log: /var/log/rgbforge-helper.log
+
+description="RGB Forge hardware service (the only process allowed to touch RGB lighting hardware)"
+
+supervisor=supervise-daemon
+command=/usr/local/bin/rgbforge
+command_args="--helper"
+# Group rgbforge owns the control socket (mode 0660): only root and its members can connect.
+command_user="root:rgbforge"
+# New files start private; the service opens the socket to the group itself.
+umask=0077
+# Restart if it ever stops unexpectedly (like Restart=on-failure under systemd).
+respawn_delay=2
+respawn_max=5
+respawn_period=60
+error_log="/var/log/rgbforge-helper.log"
+output_log="/var/log/rgbforge-helper.log"
+
+depend() {
+	need localmount
+	after udev modules
+}
+
+start_pre() {
+	# I2C buses appear as device files only with i2c-dev loaded.
+	modprobe -q i2c-dev || true
+	checkpath --directory --mode 0755 --owner root:root /run/rgbforge-helper
+	checkpath --file --mode 0640 --owner root:root /var/log/rgbforge-helper.log
+}

@@ -37,7 +37,7 @@ jobs:
           NAME="rgbforge-${VERSION}-x86_64-linux"
           mkdir -p "$NAME/packaging" dist
           cp target/release/rgbforge install.sh README.md LICENSE SECURITY.md "$NAME/"
-          cp packaging/rgbforge.desktop packaging/rgbforge-helper.service "$NAME/packaging/"
+          cp packaging/rgbforge.desktop packaging/rgbforge-helper.service packaging/rgbforge-helper.openrc "$NAME/packaging/"
           strip "$NAME/rgbforge"
           tar -czf "dist/$NAME.tar.gz" "$NAME"
           (cd dist && sha256sum "$NAME.tar.gz" > "$NAME.tar.gz.sha256")

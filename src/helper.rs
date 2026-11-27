@@ -1,4 +1,5 @@
-//! `rgbforge --helper`: the privileged hardware service (runs as a sandboxed systemd service).
+//! `rgbforge --helper`: the privileged hardware service (a systemd or OpenRC service; it
+//! sandboxes itself at start-up, see [`crate::sandbox`]).
 //!
 //! It is the only process with access to the lighting hardware. It owns every device
 //! driver and accepts only the narrow requests in [`crate::proto`], so no other program
@@ -114,7 +115,8 @@ fn log_safe(text: &str) -> String {
         .collect()
 }
 
-/// One audit line on stderr (the systemd journal: `journalctl -u rgbforge-helper`).
+/// One audit line on stderr (systemd: `journalctl -u rgbforge-helper`; OpenRC:
+/// `/var/log/rgbforge-helper.log`).
 /// Records who did a security-relevant thing. Never colours, never message bodies.
 fn audit_line(peer: Peer, event: &str, detail: &str) -> String {
     format!("rgbforge-helper audit: event={event} uid={} pid={} {detail}", peer.uid, peer.pid)
@@ -137,14 +139,17 @@ pub fn run() -> ExitCode {
             return ExitCode::FAILURE;
         }
     };
-    // Only root and members of the service's group (`rgbforge`, set with Group= in the systemd
-    // unit; the installer adds the desktop user to it) may connect. Other accounts on the PC
-    // can't reach the service at all.
+    // Only root and members of the service's group (`rgbforge`: Group= in the systemd unit,
+    // command_user in the OpenRC script; the installer adds the desktop user to it) may
+    // connect. Other accounts on the PC can't reach the service at all.
     if let Err(e) = fs::set_permissions(path, fs::Permissions::from_mode(0o660)) {
         eprintln!("rgbforge-helper: can't set socket permissions: {e}");
         return ExitCode::FAILURE;
     }
     eprintln!("rgbforge-helper: listening on {}", proto::SOCKET);
+    // Lock the service down before any client thread exists (they inherit it). Under systemd
+    // this adds to the unit's sandbox; under OpenRC and others it is the sandbox.
+    eprintln!("rgbforge-helper: {}", crate::sandbox::harden().line());
 
     let state = Arc::new(Mutex::new(State::default()));
     let clients = Arc::new(AtomicUsize::new(0));

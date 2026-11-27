@@ -32,7 +32,7 @@ cosign verify-blob-attestation --new-bundle-format --bundle rgbforge-*-x86_64-li
 
 Then restart your PC once and open **RGB Forge** from your app menu.
 
-Works on 64-bit (x86_64) Linux distributions from about 2022 onwards (glibc 2.35+) with systemd, including Arch, Fedora, Ubuntu 22.04+ and Debian 12+.
+Works on 64-bit (x86_64) Linux distributions from about 2022 onwards (glibc 2.35+) with systemd or OpenRC, including Arch, Fedora, Ubuntu 22.04+, Debian 12+ and Gentoo. Needs `sudo` or `doas`.
 
 ## What's in it
 - One app for your motherboard, ARGB fans, liquid coolers, GPU, RAM and peripherals.
